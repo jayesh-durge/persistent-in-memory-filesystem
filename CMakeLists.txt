@@ -1,0 +1,41 @@
+cmake_minimum_required(VERSION 3.16)
+
+project(pisf
+    VERSION 0.1.0
+    DESCRIPTION "Persistent In-memory/Storage Filesystem skeleton"
+    LANGUAGES CXX
+)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Common compiler warnings for robust systems programming
+add_library(pisf_compiler_flags INTERFACE)
+target_compile_options(pisf_compiler_flags INTERFACE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wshadow
+    -Wconversion
+    -Wnon-virtual-dtor
+    -Wold-style-cast
+    -Wcast-align
+    -Wunused
+    -Woverloaded-virtual
+)
+
+# Common include directory
+include_directories(${PROJECT_SOURCE_DIR}/include)
+
+# Server executable target
+add_executable(pisf-server
+    src/server.cpp
+)
+target_link_libraries(pisf-server PRIVATE pisf_compiler_flags)
+
+# Client executable target
+add_executable(pisf-client
+    src/client.cpp
+)
+target_link_libraries(pisf-client PRIVATE pisf_compiler_flags)

@@ -1,0 +1,17 @@
+# Build outputs
+build/
+bin/
+*.o
+*.a
+*.so
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test artifacts and runtime sockets
+*.sock
+/tmp/pisf*.sock
