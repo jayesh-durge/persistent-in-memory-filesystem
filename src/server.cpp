@@ -35,6 +35,45 @@ void print_usage(const char* prog_name) {
               << "  -h, --help            Show this help message\n";
 }
 
+// Dispatches a single client command and returns true if the client session should continue.
+bool handle_client_command(const std::string& request, int client_fd, bool& shutdown_server, std::string& err) {
+    if (request == "PING") {
+        if (!pisf::send_line(client_fd, "PONG", err)) {
+            return false;
+        }
+        std::cout << "[Info] Handled PING -> PONG\n";
+        return true;
+    }
+
+    if (request == "QUIT") {
+        pisf::send_line(client_fd, "BYE", err);
+        std::cout << "[Info] Handled QUIT -> BYE (closing client connection)\n";
+        return false;
+    }
+
+    if (request == "SHUTDOWN") {
+        pisf::send_line(client_fd, "OK SHUTDOWN", err);
+        std::cout << "[Info] Handled SHUTDOWN -> initiating graceful server shutdown\n";
+        shutdown_server = true;
+        return false;
+    }
+
+    if (request.empty()) {
+        if (!pisf::send_line(client_fd, "ERR empty command", err)) {
+            return false;
+        }
+        return true;
+    }
+
+    // Unknown command error handling
+    std::string err_resp = "ERR unknown command '" + request + "'";
+    std::cout << "[Info] " << err_resp << "\n";
+    if (!pisf::send_line(client_fd, err_resp, err)) {
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -115,7 +154,7 @@ int main(int argc, char* argv[]) {
         int client_fd = ::accept(listen_fd, nullptr, nullptr);
         if (client_fd < 0) {
             if (errno == EINTR) {
-                // Signal received, check loop condition
+                // Signal received, re-evaluate loop condition
                 break;
             }
             std::cerr << "[Warning] accept() failed: " << std::strerror(errno) << "\n";
@@ -124,34 +163,38 @@ int main(int argc, char* argv[]) {
 
         std::cout << "[Info] Client connected (fd: " << client_fd << ")\n";
 
-        // Read request from client
-        std::string request_line;
+        // Client session command loop: allow client to send multiple commands
         std::string client_buffer;
-        pisf::ReadStatus read_stat = pisf::read_line(client_fd, request_line, client_buffer, err);
+        bool keep_client_alive = true;
+        bool shutdown_server = false;
 
-        if (read_stat == pisf::ReadStatus::Success) {
-            std::cout << "[Info] Received request: " << request_line << "\n";
+        while (keep_client_alive && !g_shutdown_requested) {
+            std::string request_line;
+            pisf::ReadStatus read_stat = pisf::read_line(client_fd, request_line, client_buffer, err);
 
-            std::string response;
-            if (request_line == "PING") {
-                response = "PONG";
+            if (read_stat == pisf::ReadStatus::Success) {
+                std::cout << "[Info] Received: '" << request_line << "'\n";
+                keep_client_alive = handle_client_command(request_line, client_fd, shutdown_server, err);
+                if (shutdown_server) {
+                    g_shutdown_requested = 1;
+                    break;
+                }
+            } else if (read_stat == pisf::ReadStatus::PeerClosed) {
+                std::cout << "[Info] Client disconnected (EOF)\n";
+                break;
+            } else if (read_stat == pisf::ReadStatus::Interrupted) {
+                if (g_shutdown_requested) {
+                    break;
+                }
+                continue;
             } else {
-                response = "OK: " + request_line;
+                std::cerr << "[Warning] Client read error: " << err << "\n";
+                break;
             }
-
-            if (!pisf::send_line(client_fd, response, err)) {
-                std::cerr << "[Warning] Failed to send response: " << err << "\n";
-            } else {
-                std::cout << "[Info] Sent response: " << response << "\n";
-            }
-        } else if (read_stat == pisf::ReadStatus::PeerClosed) {
-            std::cout << "[Info] Client closed connection before sending data\n";
-        } else if (read_stat == pisf::ReadStatus::Error) {
-            std::cerr << "[Warning] Client read error: " << err << "\n";
         }
 
         ::close(client_fd);
-        std::cout << "[Info] Client disconnected (fd: " << client_fd << ")\n";
+        std::cout << "[Info] Closed client connection (fd: " << client_fd << ")\n";
     }
 
     std::cout << "\n[Info] Shutting down server gracefully...\n";

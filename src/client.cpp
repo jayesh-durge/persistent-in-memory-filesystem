@@ -12,15 +12,38 @@ void print_usage(const char* prog_name) {
               << "Options:\n"
               << "  -s, --socket <path>   Set Unix domain socket path\n"
               << "  -h, --help            Show this help message\n\n"
-              << "If no command is specified, defaults to sending 'PING'.\n";
+              << "If no command is provided, starts an interactive command loop (REPL).\n"
+              << "Supported commands:\n"
+              << "  PING                  Checks server liveness (expects PONG)\n"
+              << "  QUIT                  Ends the current client session\n"
+              << "  SHUTDOWN              Requests graceful server termination\n";
+}
+
+bool execute_single_command(int client_fd, const std::string& cmd, std::string& recv_buffer, std::string& response_out) {
+    std::string err;
+    if (!pisf::send_line(client_fd, cmd, err)) {
+        std::cerr << "[Error] Failed to send command '" << cmd << "': " << err << "\n";
+        return false;
+    }
+
+    pisf::ReadStatus read_stat = pisf::read_line(client_fd, response_out, recv_buffer, err);
+    if (read_stat == pisf::ReadStatus::Success) {
+        return true;
+    } else if (read_stat == pisf::ReadStatus::PeerClosed) {
+        std::cerr << "[Info] Server closed connection\n";
+        return false;
+    } else {
+        std::cerr << "[Error] Failed to receive response: " << err << "\n";
+        return false;
+    }
 }
 
 } // namespace
 
 int main(int argc, char* argv[]) {
     std::string socket_path = pisf::get_default_socket_path();
-    std::string command_to_send = "PING";
-    bool command_specified = false;
+    std::string single_command;
+    bool has_single_command = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -34,19 +57,16 @@ int main(int argc, char* argv[]) {
             print_usage(argv[0]);
             return 1;
         } else {
-            if (!command_specified) {
-                command_to_send = arg;
-                command_specified = true;
+            if (!has_single_command) {
+                single_command = arg;
+                has_single_command = true;
             } else {
-                command_to_send += " " + arg;
+                single_command += " " + arg;
             }
         }
     }
 
-    std::cout << "=== PISF Client ===\n"
-              << "Connecting to server at: " << socket_path << "\n";
-
-    // Create Unix domain stream socket
+    // Connect to the Unix domain socket
     int client_fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (client_fd < 0) {
         std::cerr << "[Error] socket() failed: " << std::strerror(errno) << "\n";
@@ -61,7 +81,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Connect to server socket
     if (::connect(client_fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
         std::cerr << "[Error] Failed to connect to server at '" << socket_path
                   << "': " << std::strerror(errno) << " (is the server running?)\n";
@@ -69,34 +88,55 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::cout << "[Info] Connected to server successfully\n";
-    std::cout << "[Info] Sending command: " << command_to_send << "\n";
+    std::string recv_buffer;
 
-    // Send command with newline framing
-    if (!pisf::send_line(client_fd, command_to_send, err)) {
-        std::cerr << "[Error] Failed to send command to server: " << err << "\n";
+    if (has_single_command) {
+        // Single command execution mode
+        std::string response;
+        if (execute_single_command(client_fd, single_command, recv_buffer, response)) {
+            std::cout << "[Response] " << response << "\n";
+        }
         ::close(client_fd);
-        return 1;
+        return 0;
     }
 
-    // Read newline-framed response from server
-    std::string response;
-    std::string buffer;
-    pisf::ReadStatus read_stat = pisf::read_line(client_fd, response, buffer, err);
+    // Interactive / stream command loop
+    bool is_interactive = (isatty(STDIN_FILENO) != 0);
+    if (is_interactive) {
+        std::cout << "Connected to PISF server at " << socket_path << "\n"
+                  << "Type commands (e.g., PING, QUIT). Press Ctrl+D to exit.\n";
+    }
 
-    if (read_stat == pisf::ReadStatus::Success) {
+    std::string line;
+    while (true) {
+        if (is_interactive) {
+            std::cout << "pisf> " << std::flush;
+        }
+
+        if (!std::getline(std::cin, line)) {
+            // EOF reached
+            if (is_interactive) {
+                std::cout << "\n[Info] Exiting...\n";
+            }
+            break;
+        }
+
+        if (line.empty()) {
+            continue;
+        }
+
+        std::string response;
+        if (!execute_single_command(client_fd, line, recv_buffer, response)) {
+            break;
+        }
+
         std::cout << "[Response] " << response << "\n";
-    } else if (read_stat == pisf::ReadStatus::PeerClosed) {
-        std::cerr << "[Error] Server closed connection without sending a response\n";
-        ::close(client_fd);
-        return 1;
-    } else {
-        std::cerr << "[Error] Failed to receive response: " << err << "\n";
-        ::close(client_fd);
-        return 1;
+
+        if (line == "QUIT" || response == "BYE" || response == "OK SHUTDOWN") {
+            break;
+        }
     }
 
     ::close(client_fd);
-    std::cout << "[Info] Connection closed cleanly\n";
     return 0;
 }
