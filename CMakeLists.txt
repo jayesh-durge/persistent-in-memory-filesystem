@@ -39,3 +39,10 @@ add_executable(pisf-client
     src/client.cpp
 )
 target_link_libraries(pisf-client PRIVATE pisf_compiler_flags)
+
+# Testing configuration
+enable_testing()
+add_test(
+    NAME smoke_test
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke_test.sh ${CMAKE_CURRENT_BINARY_DIR}
+)

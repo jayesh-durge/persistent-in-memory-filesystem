@@ -77,6 +77,7 @@ bool handle_client_command(const std::string& request, int client_fd, bool& shut
 } // namespace
 
 int main(int argc, char* argv[]) {
+    std::cout << std::unitbuf;
     std::string socket_path = pisf::get_default_socket_path();
 
     for (int i = 1; i < argc; ++i) {
