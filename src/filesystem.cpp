@@ -88,4 +88,184 @@ bool Filesystem::resolve_path_locked(const std::vector<std::string>& components,
     return true;
 }
 
+std::string Filesystem::mkdir(const std::string& path) {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+
+    if (components.empty()) {
+        return "ERR already exists";
+    }
+
+    std::string target_name = components.back();
+    components.pop_back();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId parent_id = 0;
+    if (!resolve_path_locked(components, parent_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto parent_it = nodes_.find(parent_id);
+    if (parent_it == nodes_.end()) {
+        return "ERR internal error: parent node missing";
+    }
+
+    Node& parent_node = parent_it->second;
+    if (parent_node.type != NodeType::Directory) {
+        return "ERR not a directory: parent is a file";
+    }
+
+    if (parent_node.children.find(target_name) != parent_node.children.end()) {
+        return "ERR already exists";
+    }
+
+    NodeId new_id = next_node_id_++;
+    Node new_node;
+    new_node.id = new_id;
+    new_node.name = target_name;
+    new_node.type = NodeType::Directory;
+    new_node.parent_id = parent_id;
+
+    nodes_[new_id] = std::move(new_node);
+    parent_node.children[target_name] = new_id;
+
+    return "OK";
+}
+
+std::string Filesystem::create(const std::string& path) {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+
+    if (components.empty()) {
+        return "ERR cannot create file at root";
+    }
+
+    std::string target_name = components.back();
+    components.pop_back();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId parent_id = 0;
+    if (!resolve_path_locked(components, parent_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto parent_it = nodes_.find(parent_id);
+    if (parent_it == nodes_.end()) {
+        return "ERR internal error: parent node missing";
+    }
+
+    Node& parent_node = parent_it->second;
+    if (parent_node.type != NodeType::Directory) {
+        return "ERR not a directory: parent is a file";
+    }
+
+    if (parent_node.children.find(target_name) != parent_node.children.end()) {
+        return "ERR already exists";
+    }
+
+    NodeId new_id = next_node_id_++;
+    Node new_node;
+    new_node.id = new_id;
+    new_node.name = target_name;
+    new_node.type = NodeType::File;
+    new_node.parent_id = parent_id;
+
+    nodes_[new_id] = std::move(new_node);
+    parent_node.children[target_name] = new_id;
+
+    return "OK";
+}
+
+std::string Filesystem::ls(const std::string& path) const {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end()) {
+        return "ERR internal error: node missing";
+    }
+
+    const Node& node = it->second;
+    if (node.type != NodeType::Directory) {
+        return "ERR not a directory";
+    }
+
+    std::vector<std::string> child_names;
+    child_names.reserve(node.children.size());
+    for (const auto& [name, id] : node.children) {
+        static_cast<void>(id);
+        child_names.push_back(name);
+    }
+
+    std::sort(child_names.begin(), child_names.end());
+
+    std::string result;
+    for (size_t i = 0; i < child_names.size(); ++i) {
+        if (i > 0) {
+            result += ' ';
+        }
+        result += child_names[i];
+    }
+
+    return result;
+}
+
+std::string Filesystem::stat(const std::string& path) const {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end()) {
+        return "ERR internal error: node missing";
+    }
+
+    const Node& node = it->second;
+    return "name=" + node.name + " type=" + to_string(node.type) + " id=" + std::to_string(node.id);
+}
+
+bool Filesystem::exists(const std::string& path) const {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NodeId target_id = 0;
+    return resolve_path_locked(components, target_id, err_msg);
+}
+
+size_t Filesystem::total_nodes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return nodes_.size();
+}
+
 } // namespace pisf

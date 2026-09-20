@@ -1,4 +1,5 @@
 #include <pisf/common.hpp>
+#include <pisf/filesystem.hpp>
 
 #include <atomic>
 #include <csignal>
@@ -16,6 +17,9 @@
 #include <vector>
 
 namespace {
+
+// In-memory hierarchical filesystem instance
+pisf::Filesystem g_fs;
 
 // Atomic flag indicating whether server shutdown has been initiated
 std::atomic<bool> g_shutdown_requested{false};
@@ -109,6 +113,73 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
             return false;
         }
         return true;
+    }
+
+    // Parse command verb and argument (delimited by whitespace)
+    size_t start = request.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+        if (!pisf::send_line(client_fd, "ERR empty command", err)) {
+            return false;
+        }
+        return true;
+    }
+
+    size_t space_pos = request.find_first_of(" \t", start);
+    std::string verb;
+    std::string arg;
+    if (space_pos == std::string::npos) {
+        verb = request.substr(start);
+    } else {
+        verb = request.substr(start, space_pos - start);
+        size_t arg_start = request.find_first_not_of(" \t", space_pos);
+        if (arg_start != std::string::npos) {
+            size_t arg_end = request.find_last_not_of(" \t\r\n");
+            arg = request.substr(arg_start, arg_end - arg_start + 1);
+        }
+    }
+
+    if (verb == "MKDIR") {
+        if (arg.empty()) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled MKDIR -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        std::string resp = g_fs.mkdir(arg);
+        log_msg("[Info] Handled MKDIR '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
+    if (verb == "CREATE") {
+        if (arg.empty()) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled CREATE -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        std::string resp = g_fs.create(arg);
+        log_msg("[Info] Handled CREATE '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
+    if (verb == "LS") {
+        if (arg.empty()) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled LS -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        std::string resp = g_fs.ls(arg);
+        log_msg("[Info] Handled LS '" + arg + "' -> '" + resp + "' (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
+    if (verb == "STAT") {
+        if (arg.empty()) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled STAT -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        std::string resp = g_fs.stat(arg);
+        log_msg("[Info] Handled STAT '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
     }
 
     // Unknown command error handling

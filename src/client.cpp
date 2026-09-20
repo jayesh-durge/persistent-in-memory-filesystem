@@ -16,7 +16,11 @@ void print_usage(const char* prog_name) {
               << "Supported commands:\n"
               << "  PING                  Checks server liveness (expects PONG)\n"
               << "  QUIT                  Ends the current client session\n"
-              << "  SHUTDOWN              Requests graceful server termination\n";
+              << "  SHUTDOWN              Requests graceful server termination\n"
+              << "  MKDIR <path>          Creates a directory\n"
+              << "  CREATE <path>         Creates an empty file\n"
+              << "  LS <path>             Lists directory contents\n"
+              << "  STAT <path>           Displays node metadata\n";
 }
 
 bool execute_single_command(int client_fd, const std::string& cmd, std::string& recv_buffer, std::string& response_out) {

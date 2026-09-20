@@ -34,6 +34,7 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 # Server executable target
 add_executable(pisf-server
     src/server.cpp
+    src/filesystem.cpp
 )
 target_link_libraries(pisf-server PRIVATE pisf_compiler_flags Threads::Threads)
 
@@ -45,7 +46,20 @@ target_link_libraries(pisf-client PRIVATE pisf_compiler_flags)
 
 # Testing configuration
 enable_testing()
+
+add_executable(filesystem_test
+    tests/filesystem_test.cpp
+    src/filesystem.cpp
+)
+target_link_libraries(filesystem_test PRIVATE pisf_compiler_flags Threads::Threads)
+
+add_test(
+    NAME filesystem_test
+    COMMAND filesystem_test
+)
+
 add_test(
     NAME smoke_test
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke_test.sh ${CMAKE_CURRENT_BINARY_DIR}
 )
+
