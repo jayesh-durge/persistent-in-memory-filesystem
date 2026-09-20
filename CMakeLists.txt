@@ -10,6 +10,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Threading support
+find_package(Threads REQUIRED)
+
 # Common compiler warnings for robust systems programming
 add_library(pisf_compiler_flags INTERFACE)
 target_compile_options(pisf_compiler_flags INTERFACE
@@ -32,7 +35,7 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 add_executable(pisf-server
     src/server.cpp
 )
-target_link_libraries(pisf-server PRIVATE pisf_compiler_flags)
+target_link_libraries(pisf-server PRIVATE pisf_compiler_flags Threads::Threads)
 
 # Client executable target
 add_executable(pisf-client
