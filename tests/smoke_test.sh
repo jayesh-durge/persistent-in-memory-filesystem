@@ -51,7 +51,7 @@ echo " Test socket:     ${TEST_SOCK}"
 echo "=========================================================="
 
 # Test 1: Client connection failure handling when server is unavailable
-echo -n "[Test 1/15] Client connection failure when server is unavailable... "
+echo -n "[Test 1/18] Client connection failure when server is unavailable... "
 if "${CLIENT_BIN}" -s "${TEST_SOCK}" >/dev/null 2>&1; then
     echo "FAILED (client should have failed when server is down)"
     exit 1
@@ -59,7 +59,7 @@ fi
 echo "PASSED"
 
 # Test 2: Server startup, Unix domain socket creation, and single PING/PONG
-echo -n "[Test 2/15] Server startup and single PING/PONG... "
+echo -n "[Test 2/18] Server startup and single PING/PONG... "
 "${SERVER_BIN}" -s "${TEST_SOCK}" >"${TEST_TMP_DIR}/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -77,7 +77,7 @@ fi
 echo "PASSED"
 
 # Test 3: Multi-command session, unknown command handling, and QUIT
-echo -n "[Test 3/15] Multi-command session, unknown command, and QUIT... "
+echo -n "[Test 3/18] Multi-command session, unknown command, and QUIT... "
 SESSION_OUTPUT=$(printf "PING\nNON_EXISTENT_CMD\nPING\nQUIT\n" | "${CLIENT_BIN}" -s "${TEST_SOCK}")
 
 if ! echo "${SESSION_OUTPUT}" | grep -q "\[Response\] PONG"; then
@@ -95,7 +95,7 @@ fi
 echo "PASSED"
 
 # Test 4: Prevent duplicate server on active socket
-echo -n "[Test 4/15] Duplicate server refused on active socket... "
+echo -n "[Test 4/18] Duplicate server refused on active socket... "
 if "${SERVER_BIN}" -s "${TEST_SOCK}" >/dev/null 2>&1; then
     echo "FAILED (second server should have been refused)"
     exit 1
@@ -103,7 +103,7 @@ fi
 echo "PASSED"
 
 # Test 5: Client A remains idle while Client B connects and executes PING
-echo -n "[Test 5/15] Idle Client A does not block concurrent Client B... "
+echo -n "[Test 5/18] Idle Client A does not block concurrent Client B... "
 # Client A connects and sits idle holding the connection
 python3 -c "
 import socket, time
@@ -144,7 +144,7 @@ wait "${PYTHON_CLIENT_A_PID}"
 echo "PASSED"
 
 # Test 6: Multiple concurrent clients issuing commands without response mixing
-echo -n "[Test 6/15] 5 concurrent clients issuing multiple commands... "
+echo -n "[Test 6/18] 5 concurrent clients issuing multiple commands... "
 PIDS=()
 for i in {1..5}; do
     (
@@ -168,7 +168,7 @@ done
 echo "PASSED"
 
 # Test 7: QUIT closes only requesting client session; server remains available
-echo -n "[Test 7/15] QUIT closes only requesting client... "
+echo -n "[Test 7/18] QUIT closes only requesting client... "
 QUIT_RESP=$("${CLIENT_BIN}" -s "${TEST_SOCK}" QUIT)
 if ! echo "${QUIT_RESP}" | grep -q "\[Response\] BYE"; then
     echo "FAILED (QUIT did not return BYE)"
@@ -184,7 +184,7 @@ fi
 echo "PASSED"
 
 # Test 8: Abrupt client disconnect handled cleanly
-echo -n "[Test 8/15] Abrupt client disconnect handled cleanly... "
+echo -n "[Test 8/18] Abrupt client disconnect handled cleanly... "
 python3 -c "
 import socket
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -201,7 +201,7 @@ fi
 echo "PASSED"
 
 # Test 9: Root initialization, directory/file creation, sorted listing, and STAT metadata
-echo -n "[Test 9/15] Filesystem tree creation, listing, sorting, and STAT... "
+echo -n "[Test 9/18] Filesystem tree creation, listing, sorting, and STAT... "
 ROOT_STAT=$("${CLIENT_BIN}" -s "${TEST_SOCK}" STAT /)
 if ! echo "${ROOT_STAT}" | grep -q "\[Response\] name=/ type=directory id=1"; then
     echo "FAILED (unexpected root stat: ${ROOT_STAT})"
@@ -275,7 +275,7 @@ fi
 echo "PASSED"
 
 # Test 10: Filesystem error handling (missing paths, non-directories, duplicate names)
-echo -n "[Test 10/15] Filesystem error handling (missing, non-directory, duplicates)... "
+echo -n "[Test 10/18] Filesystem error handling (missing, non-directory, duplicates)... "
 # Missing paths
 LS_MISSING=$("${CLIENT_BIN}" -s "${TEST_SOCK}" LS /missing)
 if ! echo "${LS_MISSING}" | grep -q "\[Response\] ERR not found"; then
@@ -331,7 +331,7 @@ fi
 echo "PASSED"
 
 # Test 11: Invalid path syntax, normalization, and malformed commands
-echo -n "[Test 11/15] Invalid path syntax, normalization, and malformed commands... "
+echo -n "[Test 11/18] Invalid path syntax, normalization, and malformed commands... "
 # Relative path rejection
 REL_MKDIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" MKDIR relative/path)
 if ! echo "${REL_MKDIR}" | grep -q "\[Response\] ERR invalid path"; then
@@ -391,7 +391,7 @@ fi
 echo "PASSED"
 
 # Test 12: Concurrent clients creating identical path (contested race condition)
-echo -n "[Test 12/15] Concurrent clients creating identical path (contested race)... "
+echo -n "[Test 12/18] Concurrent clients creating identical path (contested race)... "
 RACE_PIDS=()
 for i in {1..10}; do
     "${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /race_file.txt >"${TEST_TMP_DIR}/race_${i}.log" 2>&1 &
@@ -419,7 +419,7 @@ fi
 echo "PASSED"
 
 # Test 13: Concurrent independent filesystem operations without corruption
-echo -n "[Test 13/15] Concurrent independent filesystem operations... "
+echo -n "[Test 13/18] Concurrent independent filesystem operations... "
 CONC_FS_PIDS=()
 for c in {1..6}; do
     (
@@ -442,8 +442,151 @@ for pid in "${CONC_FS_PIDS[@]}"; do
 done
 echo "PASSED"
 
-# Test 14: Graceful server shutdown via SHUTDOWN command with an idle client connected
-echo -n "[Test 14/15] SHUTDOWN unblocks idle client and cleans up... "
+# Test 14: File WRITE and READ operations over socket
+echo -n "[Test 14/18] File content operations (empty read, write, read, replace, spaces)... "
+"${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /test_content.txt >/dev/null
+
+# 1. Read newly created empty file
+READ_EMPTY=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /test_content.txt)
+if [[ "${READ_EMPTY}" != "[Response] "* ]] && [[ "${READ_EMPTY}" != "[Response]"* ]]; then
+    echo "FAILED (READ empty file should produce empty response, got: ${READ_EMPTY})"
+    exit 1
+fi
+
+# 2. Write content
+WRITE_RESP=$("${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /test_content.txt Hello from PISF)
+if ! echo "${WRITE_RESP}" | grep -q "\[Response\] OK"; then
+    echo "FAILED (WRITE failed: ${WRITE_RESP})"
+    exit 1
+fi
+
+# 3. Read content back
+READ_RESP=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /test_content.txt)
+if ! echo "${READ_RESP}" | grep -q "\[Response\] Hello from PISF"; then
+    echo "FAILED (READ did not return expected content: ${READ_RESP})"
+    exit 1
+fi
+
+# 4. Replace content
+"${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /test_content.txt Replaced version with different text >/dev/null
+READ_REPLACED=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /test_content.txt)
+if ! echo "${READ_REPLACED}" | grep -q "\[Response\] Replaced version with different text"; then
+    echo "FAILED (READ after replace failed: ${READ_REPLACED})"
+    exit 1
+fi
+
+# 5. Content containing multiple spaces
+"${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /test_content.txt "  spaces   inside   content  " >/dev/null
+READ_SPACES=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /test_content.txt)
+if ! echo "${READ_SPACES}" | grep -q "\[Response\]   spaces   inside   content  "; then
+    echo "FAILED (READ spaces failed: ${READ_SPACES})"
+    exit 1
+fi
+echo "PASSED"
+
+# Test 15: File content error handling (missing, directory, missing args, newlines)
+echo -n "[Test 15/18] File content error handling (missing, directory, malformed, newlines)... "
+# Missing file
+READ_MISSING=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /missing_file.txt)
+if ! echo "${READ_MISSING}" | grep -q "\[Response\] ERR not found"; then
+    echo "FAILED (READ missing should return ERR not found: ${READ_MISSING})"
+    exit 1
+fi
+
+WRITE_MISSING=$("${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /missing_file.txt some_data)
+if ! echo "${WRITE_MISSING}" | grep -q "\[Response\] ERR not found"; then
+    echo "FAILED (WRITE missing should return ERR not found: ${WRITE_MISSING})"
+    exit 1
+fi
+
+# Directory target
+READ_DIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /projects)
+if ! echo "${READ_DIR}" | grep -q "\[Response\] ERR not a file"; then
+    echo "FAILED (READ directory should return ERR not a file: ${READ_DIR})"
+    exit 1
+fi
+
+WRITE_DIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /projects some_data)
+if ! echo "${WRITE_DIR}" | grep -q "\[Response\] ERR not a file"; then
+    echo "FAILED (WRITE directory should return ERR not a file: ${WRITE_DIR})"
+    exit 1
+fi
+
+# Missing path argument
+READ_NO_ARG=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ)
+if ! echo "${READ_NO_ARG}" | grep -q "\[Response\] ERR missing path argument"; then
+    echo "FAILED (READ without arg should return ERR missing path argument: ${READ_NO_ARG})"
+    exit 1
+fi
+
+WRITE_NO_ARG=$("${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE)
+if ! echo "${WRITE_NO_ARG}" | grep -q "\[Response\] ERR missing path argument"; then
+    echo "FAILED (WRITE without arg should return ERR missing path argument: ${WRITE_NO_ARG})"
+    exit 1
+fi
+
+# Client rejects embedded newlines
+NEWLINE_CLI_ERR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /test_content.txt $'line1\nline2' 2>&1 || true)
+if ! echo "${NEWLINE_CLI_ERR}" | grep -q "Commands cannot contain newline characters"; then
+    echo "FAILED (client should reject commands with embedded newlines: ${NEWLINE_CLI_ERR})"
+    exit 1
+fi
+echo "PASSED"
+
+# Test 16: Concurrent clients reading and writing the same file over sockets
+echo -n "[Test 16/18] Concurrent socket clients reading and writing same file... "
+"${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /concurrent_file.txt >/dev/null
+"${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /concurrent_file.txt "SEED_PAYLOAD" >/dev/null
+
+CONC_PIDS=()
+# 3 writer clients
+for w in {1..3}; do
+    python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('${TEST_SOCK}')
+buf = ''
+for i in range(40):
+    cmd = f'WRITE /concurrent_file.txt WRITER_${w}_PAYLOAD_INDEX_{i}\n'
+    s.sendall(cmd.encode())
+    while '\n' not in buf:
+        chunk = s.recv(256).decode()
+        if not chunk: break
+        buf += chunk
+    line, buf = buf.split('\n', 1)
+    assert 'OK' in line
+s.close()
+" >"${TEST_TMP_DIR}/conc_writer_${w}.log" 2>&1 &
+    CONC_PIDS+=($!)
+done
+
+# 3 reader clients
+for r in {1..3}; do
+    python3 -c "
+import socket
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect('${TEST_SOCK}')
+buf = ''
+for i in range(40):
+    s.sendall(b'READ /concurrent_file.txt\n')
+    while '\n' not in buf:
+        chunk = s.recv(256).decode()
+        if not chunk: break
+        buf += chunk
+    line, buf = buf.split('\n', 1)
+    assert line == 'SEED_PAYLOAD' or line.startswith('WRITER_'), f'Corrupted line: {line}'
+s.close()
+" >"${TEST_TMP_DIR}/conc_reader_${r}.log" 2>&1 &
+    CONC_PIDS+=($!)
+done
+
+for pid in "${CONC_PIDS[@]}"; do
+    wait "${pid}"
+done
+echo "PASSED"
+
+# Test 17: Graceful server shutdown via SHUTDOWN command with an idle client connected
+echo -n "[Test 17/18] SHUTDOWN unblocks idle client and cleans up... "
 # Start an idle client that sits blocked on recv()
 python3 -c "
 import socket
@@ -484,8 +627,8 @@ if [[ -e "${TEST_SOCK}" ]]; then
 fi
 echo "PASSED"
 
-# Test 15: Stale socket recovery and SIGTERM shutdown with an idle client connected
-echo -n "[Test 15/15] Stale socket recovery and SIGTERM shutdown with idle client... "
+# Test 18: Stale socket recovery and SIGTERM shutdown with an idle client connected
+echo -n "[Test 18/18] Stale socket recovery and SIGTERM shutdown with idle client... "
 # Create an orphaned socket file
 python3 -c "import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind('${TEST_SOCK}'); s.close()"
 if [[ ! -S "${TEST_SOCK}" ]]; then

@@ -249,6 +249,212 @@ void test_concurrent_independent_operations() {
     std::cout << "PASSED\n";
 }
 
+void test_read_empty_file() {
+    std::cout << "Running test_read_empty_file... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/empty.txt") == "OK");
+    assert(fs.read("/empty.txt") == "");
+
+    std::string content;
+    std::string err;
+    assert(fs.read("/empty.txt", content, err));
+    assert(content.empty());
+
+    std::cout << "PASSED\n";
+}
+
+void test_write_and_read_content() {
+    std::cout << "Running test_write_and_read_content... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/notes.txt") == "OK");
+    assert(fs.write("/notes.txt", "Hello from PISF") == "OK");
+    assert(fs.read("/notes.txt") == "Hello from PISF");
+
+    std::cout << "PASSED\n";
+}
+
+void test_replace_content() {
+    std::cout << "Running test_replace_content... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/doc.txt") == "OK");
+    assert(fs.write("/doc.txt", "Initial version") == "OK");
+    assert(fs.read("/doc.txt") == "Initial version");
+
+    assert(fs.write("/doc.txt", "Replaced with completely new contents") == "OK");
+    assert(fs.read("/doc.txt") == "Replaced with completely new contents");
+
+    std::cout << "PASSED\n";
+}
+
+void test_content_containing_spaces() {
+    std::cout << "Running test_content_containing_spaces... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/spaces.txt") == "OK");
+    std::string spaced_content = "  leading,   multiple internal   spaces, and trailing   ";
+    assert(fs.write("/spaces.txt", spaced_content) == "OK");
+    assert(fs.read("/spaces.txt") == spaced_content);
+
+    std::cout << "PASSED\n";
+}
+
+void test_missing_file_read_write() {
+    std::cout << "Running test_missing_file_read_write... ";
+    pisf::Filesystem fs;
+
+    assert(fs.read("/missing.txt").rfind("ERR not found", 0) == 0);
+    assert(fs.write("/missing.txt", "content").rfind("ERR not found", 0) == 0);
+    assert(fs.read("/nonexistent/file.txt").rfind("ERR not found", 0) == 0);
+    assert(fs.write("/nonexistent/file.txt", "content").rfind("ERR not found", 0) == 0);
+
+    std::cout << "PASSED\n";
+}
+
+void test_directory_read_write() {
+    std::cout << "Running test_directory_read_write... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/mydir") == "OK");
+
+    // Root directory
+    assert(fs.read("/") == "ERR not a file");
+    assert(fs.write("/", "data") == "ERR not a file");
+
+    // Subdirectory
+    assert(fs.read("/mydir") == "ERR not a file");
+    assert(fs.write("/mydir", "data") == "ERR not a file");
+
+    std::cout << "PASSED\n";
+}
+
+void test_empty_content_and_newlines() {
+    std::cout << "Running test_empty_content_and_newlines... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/test.txt") == "OK");
+    assert(fs.write("/test.txt", "Initial") == "OK");
+    assert(fs.read("/test.txt") == "Initial");
+
+    // Writing empty content clears the file
+    assert(fs.write("/test.txt", "") == "OK");
+    assert(fs.read("/test.txt") == "");
+
+    // Embedded newlines must be rejected
+    assert(fs.write("/test.txt", "line1\nline2") == "ERR invalid content: newline characters not allowed");
+    assert(fs.write("/test.txt", "line1\rline2") == "ERR invalid content: newline characters not allowed");
+    assert(fs.read("/test.txt") == ""); // unchanged
+
+    std::cout << "PASSED\n";
+}
+
+void test_concurrent_different_files() {
+    std::cout << "Running test_concurrent_different_files... ";
+    pisf::Filesystem fs;
+
+    constexpr int NUM_THREADS = 8;
+    constexpr int ITERATIONS = 100;
+    std::vector<std::thread> threads;
+    std::atomic<bool> failed{false};
+
+    for (int t = 0; t < NUM_THREADS; ++t) {
+        threads.emplace_back([&fs, t, &failed]() {
+            std::string path = "/thread_" + std::to_string(t) + ".txt";
+            if (fs.create(path) != "OK") {
+                failed.store(true);
+                return;
+            }
+
+            for (int i = 0; i < ITERATIONS; ++i) {
+                std::string payload = "data_thread_" + std::to_string(t) + "_iter_" + std::to_string(i);
+                if (fs.write(path, payload) != "OK") {
+                    failed.store(true);
+                    return;
+                }
+                if (fs.read(path) != payload) {
+                    failed.store(true);
+                    return;
+                }
+            }
+        });
+    }
+
+    for (auto& th : threads) {
+        th.join();
+    }
+
+    assert(!failed.load());
+    std::cout << "PASSED\n";
+}
+
+void test_concurrent_same_file_read_write() {
+    std::cout << "Running test_concurrent_same_file_read_write... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/shared.txt") == "OK");
+    assert(fs.write("/shared.txt", "INITIAL_STATE_0000000000000000000000") == "OK");
+
+    constexpr int NUM_WRITERS = 4;
+    constexpr int NUM_READERS = 4;
+    constexpr int ITERATIONS = 300;
+
+    std::vector<std::string> valid_payloads;
+    valid_payloads.push_back("INITIAL_STATE_0000000000000000000000");
+    for (int w = 0; w < NUM_WRITERS; ++w) {
+        valid_payloads.push_back("WRITER_" + std::to_string(w) + "_PAYLOAD_ABCDEFGHIJKLMN");
+    }
+
+    std::vector<std::thread> threads;
+    std::atomic<bool> stop_flag{false};
+    std::atomic<bool> corruption_detected{false};
+
+    // Writers
+    for (int w = 0; w < NUM_WRITERS; ++w) {
+        threads.emplace_back([&fs, w, &valid_payloads]() {
+            const std::string& payload = valid_payloads[static_cast<size_t>(w + 1)];
+            for (int i = 0; i < ITERATIONS; ++i) {
+                fs.write("/shared.txt", payload);
+            }
+        });
+    }
+
+    // Readers
+    for (int r = 0; r < NUM_READERS; ++r) {
+        threads.emplace_back([&fs, &valid_payloads, &corruption_detected, &stop_flag]() {
+            while (!stop_flag.load(std::memory_order_relaxed)) {
+                std::string content = fs.read("/shared.txt");
+                bool valid = false;
+                for (const auto& expected : valid_payloads) {
+                    if (content == expected) {
+                        valid = true;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    corruption_detected.store(true);
+                    break;
+                }
+            }
+        });
+    }
+
+    // Join writers first
+    for (int i = 0; i < NUM_WRITERS; ++i) {
+        threads[static_cast<size_t>(i)].join();
+    }
+
+    // Stop and join readers
+    stop_flag.store(true);
+    for (size_t i = static_cast<size_t>(NUM_WRITERS); i < threads.size(); ++i) {
+        threads[i].join();
+    }
+
+    assert(!corruption_detected.load());
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -262,6 +468,15 @@ int main() {
     test_path_normalization_and_validation();
     test_concurrent_same_path_creation();
     test_concurrent_independent_operations();
+    test_read_empty_file();
+    test_write_and_read_content();
+    test_replace_content();
+    test_content_containing_spaces();
+    test_missing_file_read_write();
+    test_directory_read_write();
+    test_empty_content_and_newlines();
+    test_concurrent_different_files();
+    test_concurrent_same_file_read_write();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

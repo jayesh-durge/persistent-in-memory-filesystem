@@ -34,6 +34,7 @@ struct Node {
     NodeType type{NodeType::File};
     std::optional<NodeId> parent_id{std::nullopt};
     std::unordered_map<std::string, NodeId> children;
+    std::string content;
 };
 
 class Filesystem {
@@ -45,6 +46,9 @@ public:
     std::string create(const std::string& path);
     std::string ls(const std::string& path) const;
     std::string stat(const std::string& path) const;
+    std::string write(const std::string& path, const std::string& content);
+    std::string read(const std::string& path) const;
+    bool read(const std::string& path, std::string& out_content, std::string& err_msg) const;
 
     // Direct metadata inspection helper (thread-safe, useful for unit tests)
     bool exists(const std::string& path) const;

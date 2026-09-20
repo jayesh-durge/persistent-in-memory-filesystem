@@ -20,10 +20,16 @@ void print_usage(const char* prog_name) {
               << "  MKDIR <path>          Creates a directory\n"
               << "  CREATE <path>         Creates an empty file\n"
               << "  LS <path>             Lists directory contents\n"
-              << "  STAT <path>           Displays node metadata\n";
+              << "  STAT <path>           Displays node metadata\n"
+              << "  WRITE <path> [content] Writes content to a file\n"
+              << "  READ <path>           Reads content from a file\n";
 }
 
 bool execute_single_command(int client_fd, const std::string& cmd, std::string& recv_buffer, std::string& response_out) {
+    if (cmd.find('\n') != std::string::npos || cmd.find('\r') != std::string::npos) {
+        std::cerr << "[Error] Commands cannot contain newline characters\n";
+        return false;
+    }
     std::string err;
     if (!pisf::send_line(client_fd, cmd, err)) {
         std::cerr << "[Error] Failed to send command '" << cmd << "': " << err << "\n";

@@ -251,6 +251,76 @@ std::string Filesystem::stat(const std::string& path) const {
     return "name=" + node.name + " type=" + to_string(node.type) + " id=" + std::to_string(node.id);
 }
 
+std::string Filesystem::write(const std::string& path, const std::string& content) {
+    if (content.find('\n') != std::string::npos || content.find('\r') != std::string::npos) {
+        return "ERR invalid content: newline characters not allowed";
+    }
+
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end()) {
+        return "ERR internal error: node missing";
+    }
+
+    Node& node = it->second;
+    if (node.type != NodeType::File) {
+        return "ERR not a file";
+    }
+
+    node.content = content;
+    return "OK";
+}
+
+bool Filesystem::read(const std::string& path, std::string& out_content, std::string& err_msg) const {
+    std::vector<std::string> components;
+    if (!parse_path(path, components, err_msg)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return false;
+    }
+
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end()) {
+        err_msg = "ERR internal error: node missing";
+        return false;
+    }
+
+    const Node& node = it->second;
+    if (node.type != NodeType::File) {
+        err_msg = "ERR not a file";
+        return false;
+    }
+
+    out_content = node.content;
+    return true;
+}
+
+std::string Filesystem::read(const std::string& path) const {
+    std::string content;
+    std::string err_msg;
+    if (!read(path, content, err_msg)) {
+        return err_msg;
+    }
+    return content;
+}
+
 bool Filesystem::exists(const std::string& path) const {
     std::vector<std::string> components;
     std::string err_msg;

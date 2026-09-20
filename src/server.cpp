@@ -182,6 +182,47 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         return pisf::send_line(client_fd, resp, err);
     }
 
+    if (verb == "WRITE") {
+        if (space_pos == std::string::npos) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled WRITE -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+
+        size_t path_start = request.find_first_not_of(" \t", space_pos);
+        if (path_start == std::string::npos) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled WRITE -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+
+        size_t path_end = request.find_first_of(" \t", path_start);
+        std::string path;
+        std::string content;
+        if (path_end == std::string::npos) {
+            path = request.substr(path_start);
+            content = "";
+        } else {
+            path = request.substr(path_start, path_end - path_start);
+            content = request.substr(path_end + 1);
+        }
+
+        std::string resp = g_fs.write(path, content);
+        log_msg("[Info] Handled WRITE '" + path + "' (" + std::to_string(content.size()) + " bytes) -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
+    if (verb == "READ") {
+        if (arg.empty()) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled READ -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        std::string resp = g_fs.read(arg);
+        log_msg("[Info] Handled READ '" + arg + "' -> '" + resp + "' (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
     // Unknown command error handling
     std::string err_resp = "ERR unknown command '" + request + "'";
     log_msg("[Info] " + err_resp + " (fd: " + std::to_string(client_fd) + ")");
