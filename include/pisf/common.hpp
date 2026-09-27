@@ -25,6 +25,20 @@ inline std::string get_default_socket_path() {
     return "/tmp/pisf-" + std::to_string(getuid()) + ".sock";
 }
 
+// Determines the default persistent storage directory.
+// Prefers $PISF_DATA_DIR, then $XDG_DATA_HOME/pisf, falling back to /tmp/pisf-data-<uid>.
+inline std::string get_default_storage_dir() {
+    const char* env_dir = std::getenv("PISF_DATA_DIR");
+    if (env_dir != nullptr && env_dir[0] != '\0') {
+        return std::string(env_dir);
+    }
+    const char* xdg_data = std::getenv("XDG_DATA_HOME");
+    if (xdg_data != nullptr && xdg_data[0] != '\0') {
+        return std::string(xdg_data) + "/pisf";
+    }
+    return "/tmp/pisf-data-" + std::to_string(getuid());
+}
+
 enum class SocketStatus {
     DoesNotExist,
     Stale,

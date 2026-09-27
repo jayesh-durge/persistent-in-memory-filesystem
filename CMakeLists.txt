@@ -35,6 +35,7 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 add_executable(pisf-server
     src/server.cpp
     src/filesystem.cpp
+    src/storage.cpp
 )
 target_link_libraries(pisf-server PRIVATE pisf_compiler_flags Threads::Threads)
 
@@ -46,6 +47,17 @@ target_link_libraries(pisf-client PRIVATE pisf_compiler_flags)
 
 # Testing configuration
 enable_testing()
+
+add_executable(storage_test
+    tests/storage_test.cpp
+    src/storage.cpp
+)
+target_link_libraries(storage_test PRIVATE pisf_compiler_flags Threads::Threads)
+
+add_test(
+    NAME storage_test
+    COMMAND storage_test
+)
 
 add_executable(filesystem_test
     tests/filesystem_test.cpp
