@@ -62,6 +62,7 @@ add_test(
 add_executable(filesystem_test
     tests/filesystem_test.cpp
     src/filesystem.cpp
+    src/storage.cpp
 )
 target_link_libraries(filesystem_test PRIVATE pisf_compiler_flags Threads::Threads)
 

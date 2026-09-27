@@ -2,9 +2,16 @@
 
 #include <algorithm>
 
+#include <pisf/common.hpp>
+
 namespace pisf {
 
-Filesystem::Filesystem() {
+Filesystem::Filesystem()
+    : Filesystem(get_default_storage_dir()) {
+}
+
+Filesystem::Filesystem(std::string data_dir)
+    : storage_(std::make_unique<BlobStorage>(std::move(data_dir))) {
     Node root;
     root.id = ROOT_NODE_ID;
     root.name = "/";
@@ -12,6 +19,47 @@ Filesystem::Filesystem() {
     root.parent_id = std::nullopt;
 
     nodes_[ROOT_NODE_ID] = std::move(root);
+
+    std::string err;
+    storage_->init(err);
+}
+
+bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto new_storage = std::make_unique<BlobStorage>(data_dir);
+    if (!new_storage->init(err_msg)) {
+        return false;
+    }
+    storage_ = std::move(new_storage);
+    return true;
+}
+
+const BlobStorage* Filesystem::storage() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return storage_.get();
+}
+
+bool Filesystem::get_node_extent(const std::string& path, uint64_t& out_offset, uint64_t& out_length) const {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return false;
+    }
+
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end() || it->second.type != NodeType::File) {
+        return false;
+    }
+
+    out_offset = it->second.content_offset;
+    out_length = it->second.content_length;
+    return true;
 }
 
 bool Filesystem::parse_path(const std::string& path, std::vector<std::string>& components, std::string& err_msg) {
@@ -262,24 +310,57 @@ std::string Filesystem::write(const std::string& path, const std::string& conten
         return err_msg;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Pre-check path existence and type to preserve existing error behavior
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        NodeId target_id = 0;
+        if (!resolve_path_locked(components, target_id, err_msg)) {
+            return err_msg;
+        }
 
-    NodeId target_id = 0;
-    if (!resolve_path_locked(components, target_id, err_msg)) {
-        return err_msg;
+        auto it = nodes_.find(target_id);
+        if (it == nodes_.end()) {
+            return "ERR internal error: node missing";
+        }
+
+        if (it->second.type != NodeType::File) {
+            return "ERR not a file";
+        }
     }
 
-    auto it = nodes_.find(target_id);
-    if (it == nodes_.end()) {
-        return "ERR internal error: node missing";
+    // 1. Append the new content to persistent blob storage
+    uint64_t offset = 0;
+    uint64_t length = 0;
+    if (!storage_ || !storage_->append(content, offset, length, err_msg)) {
+        return "ERR storage write failed: " + err_msg;
     }
 
-    Node& node = it->second;
-    if (node.type != NodeType::File) {
-        return "ERR not a file";
+    // 2. Check that the append succeeded (validated above)
+
+    // 3. Update the node's offset and length under filesystem synchronization policy
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        NodeId target_id = 0;
+        if (!resolve_path_locked(components, target_id, err_msg)) {
+            return err_msg;
+        }
+
+        auto it = nodes_.find(target_id);
+        if (it == nodes_.end()) {
+            return "ERR internal error: node missing";
+        }
+
+        Node& node = it->second;
+        if (node.type != NodeType::File) {
+            return "ERR not a file";
+        }
+
+        node.content_offset = offset;
+        node.content_length = length;
+        node.content = content;
     }
 
-    node.content = content;
+    // 4. Return success only after the required write has completed successfully
     return "OK";
 }
 

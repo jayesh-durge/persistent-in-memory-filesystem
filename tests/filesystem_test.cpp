@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -455,6 +456,53 @@ void test_concurrent_same_file_read_write() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_backed_write_extents() {
+    std::cout << "Running test_storage_backed_write_extents... ";
+    std::string path_template = "/tmp/pisf-fs-extents-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/doc.txt") == "OK");
+
+        std::string first_content = "Hello, persistent blob!";
+        assert(fs.write("/doc.txt", first_content) == "OK");
+
+        uint64_t off1 = 999, len1 = 999;
+        assert(fs.get_node_extent("/doc.txt", off1, len1));
+        assert(off1 == 0);
+        assert(len1 == first_content.size());
+
+        // Read directly from storage blob to confirm bytes were written to disk
+        std::string blob_bytes;
+        std::string err;
+        assert(fs.storage()->read_range(off1, len1, blob_bytes, err));
+        assert(blob_bytes == first_content);
+
+        // Replace file content: should allocate new extent without overwriting old extent
+        std::string second_content = "Replaced with brand new content!";
+        assert(fs.write("/doc.txt", second_content) == "OK");
+
+        uint64_t off2 = 999, len2 = 999;
+        assert(fs.get_node_extent("/doc.txt", off2, len2));
+        assert(off2 == len1);
+        assert(len2 == second_content.size());
+
+        // Verify second content in blob
+        assert(fs.storage()->read_range(off2, len2, blob_bytes, err));
+        assert(blob_bytes == second_content);
+
+        // Verify old content is still intact in blob at off1
+        assert(fs.storage()->read_range(off1, len1, blob_bytes, err));
+        assert(blob_bytes == first_content);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -477,6 +525,7 @@ int main() {
     test_empty_content_and_newlines();
     test_concurrent_different_files();
     test_concurrent_same_file_read_write();
+    test_storage_backed_write_extents();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

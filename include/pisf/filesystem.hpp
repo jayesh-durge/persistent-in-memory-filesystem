@@ -1,7 +1,10 @@
 #ifndef PISF_FILESYSTEM_HPP
 #define PISF_FILESYSTEM_HPP
 
+#include <pisf/storage.hpp>
+
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -34,12 +37,18 @@ struct Node {
     NodeType type{NodeType::File};
     std::optional<NodeId> parent_id{std::nullopt};
     std::unordered_map<std::string, NodeId> children;
+    uint64_t content_offset{0};
+    uint64_t content_length{0};
     std::string content;
 };
 
 class Filesystem {
 public:
     Filesystem();
+    explicit Filesystem(std::string data_dir);
+
+    // Reinitializes the persistent storage backend to a specific directory
+    bool init_storage(const std::string& data_dir, std::string& err_msg);
 
     // Filesystem operations (thread-safe, protected by internal mutex_)
     std::string mkdir(const std::string& path);
@@ -53,6 +62,8 @@ public:
     // Direct metadata inspection helper (thread-safe, useful for unit tests)
     bool exists(const std::string& path) const;
     size_t total_nodes() const;
+    bool get_node_extent(const std::string& path, uint64_t& out_offset, uint64_t& out_length) const;
+    const BlobStorage* storage() const;
 
     // Syntactic path parsing helper (pure function, does not access filesystem state)
     static bool parse_path(const std::string& path, std::vector<std::string>& components, std::string& err_msg);
@@ -65,6 +76,7 @@ private:
     mutable std::mutex mutex_;
     NodeId next_node_id_{ROOT_NODE_ID + 1};
     std::unordered_map<NodeId, Node> nodes_;
+    std::unique_ptr<BlobStorage> storage_;
 };
 
 } // namespace pisf
