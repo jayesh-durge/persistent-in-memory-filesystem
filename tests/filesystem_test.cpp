@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -503,6 +504,43 @@ void test_storage_backed_write_extents() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_backed_read_reflects_blob() {
+    std::cout << "Running test_storage_backed_read_reflects_blob... ";
+    std::string path_template = "/tmp/pisf-fs-readblob-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/target.txt") == "OK");
+
+        std::string original = "InitialBlobData123";
+        assert(fs.write("/target.txt", original) == "OK");
+        assert(fs.read("/target.txt") == original);
+
+        uint64_t offset = 0, length = 0;
+        assert(fs.get_node_extent("/target.txt", offset, length));
+
+        // Directly patch the blob file on disk
+        std::string blob_file = temp_dir + "/data.blob";
+        std::fstream file(blob_file, std::ios::in | std::ios::out | std::ios::binary);
+        assert(file.is_open());
+        file.seekp(static_cast<std::streamoff>(offset));
+        std::string modified = "PatchedBlobData123";
+        file.write(modified.data(), static_cast<std::streamsize>(modified.size()));
+        file.flush();
+        file.close();
+
+        // Reading via filesystem should now return the modified bytes from disk,
+        // proving content is not stored in RAM.
+        assert(fs.read("/target.txt") == modified);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -526,6 +564,7 @@ int main() {
     test_concurrent_different_files();
     test_concurrent_same_file_read_write();
     test_storage_backed_write_extents();
+    test_storage_backed_read_reflects_blob();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

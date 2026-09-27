@@ -357,7 +357,6 @@ std::string Filesystem::write(const std::string& path, const std::string& conten
 
         node.content_offset = offset;
         node.content_length = length;
-        node.content = content;
     }
 
     // 4. Return success only after the required write has completed successfully
@@ -370,26 +369,45 @@ bool Filesystem::read(const std::string& path, std::string& out_content, std::st
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    uint64_t offset = 0;
+    uint64_t length = 0;
 
-    NodeId target_id = 0;
-    if (!resolve_path_locked(components, target_id, err_msg)) {
+    // 1. Hold filesystem mutex while obtaining a consistent snapshot of content location
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        NodeId target_id = 0;
+        if (!resolve_path_locked(components, target_id, err_msg)) {
+            return false;
+        }
+
+        auto it = nodes_.find(target_id);
+        if (it == nodes_.end()) {
+            err_msg = "ERR internal error: node missing";
+            return false;
+        }
+
+        const Node& node = it->second;
+        if (node.type != NodeType::File) {
+            err_msg = "ERR not a file";
+            return false;
+        }
+
+        offset = node.content_offset;
+        length = node.content_length;
+    }
+
+    // 2. Handle empty file consistently without disk I/O
+    if (length == 0) {
+        out_content.clear();
+        return true;
+    }
+
+    // 3. Read content from persistent blob storage
+    if (!storage_ || !storage_->read_range(offset, length, out_content, err_msg)) {
         return false;
     }
 
-    auto it = nodes_.find(target_id);
-    if (it == nodes_.end()) {
-        err_msg = "ERR internal error: node missing";
-        return false;
-    }
-
-    const Node& node = it->second;
-    if (node.type != NodeType::File) {
-        err_msg = "ERR not a file";
-        return false;
-    }
-
-    out_content = node.content;
     return true;
 }
 

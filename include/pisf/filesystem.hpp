@@ -39,7 +39,6 @@ struct Node {
     std::unordered_map<std::string, NodeId> children;
     uint64_t content_offset{0};
     uint64_t content_length{0};
-    std::string content;
 };
 
 class Filesystem {
