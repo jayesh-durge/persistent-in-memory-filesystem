@@ -27,6 +27,13 @@ public:
     // Closes the open file descriptor safely.
     void close();
 
+    // Operations
+    // Appends bytes to the blob file, returning the byte offset and length.
+    bool append(const std::string& data, uint64_t& out_offset, uint64_t& out_length, std::string& err_msg);
+
+    // Reads an exact byte range [offset, offset + length) from the blob file.
+    bool read_range(uint64_t offset, uint64_t length, std::string& out_data, std::string& err_msg) const;
+
     // State inspection
     bool is_open() const;
     const std::string& data_dir() const;

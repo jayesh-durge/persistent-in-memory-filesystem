@@ -117,6 +117,139 @@ void test_storage_move_semantics() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_append_and_read_single() {
+    std::cout << "Running test_storage_append_and_read_single... ";
+    std::string base_dir = create_test_temp_dir();
+
+    pisf::BlobStorage storage(base_dir, "data.blob");
+    std::string err;
+    assert(storage.init(err));
+
+    std::string payload = "Hello, Persistent World!";
+    uint64_t offset = 999;
+    uint64_t length = 999;
+    assert(storage.append(payload, offset, length, err));
+    assert(offset == 0);
+    assert(length == payload.size());
+    assert(storage.get_size() == payload.size());
+
+    std::string read_back;
+    assert(storage.read_range(offset, length, read_back, err));
+    assert(read_back == payload);
+
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
+void test_storage_append_and_read_multiple() {
+    std::cout << "Running test_storage_append_and_read_multiple... ";
+    std::string base_dir = create_test_temp_dir();
+
+    pisf::BlobStorage storage(base_dir, "data.blob");
+    std::string err;
+    assert(storage.init(err));
+
+    std::string rec1 = "FirstRecord";
+    std::string rec2 = "SecondRecordWithMoreData";
+    std::string rec3 = "ThirdRecordEnd";
+
+    uint64_t off1 = 0, len1 = 0;
+    uint64_t off2 = 0, len2 = 0;
+    uint64_t off3 = 0, len3 = 0;
+
+    assert(storage.append(rec1, off1, len1, err));
+    assert(off1 == 0 && len1 == rec1.size());
+
+    assert(storage.append(rec2, off2, len2, err));
+    assert(off2 == len1 && len2 == rec2.size());
+
+    assert(storage.append(rec3, off3, len3, err));
+    assert(off3 == off2 + len2 && len3 == rec3.size());
+
+    // Read back in arbitrary order
+    std::string out;
+    assert(storage.read_range(off2, len2, out, err));
+    assert(out == rec2);
+
+    assert(storage.read_range(off1, len1, out, err));
+    assert(out == rec1);
+
+    assert(storage.read_range(off3, len3, out, err));
+    assert(out == rec3);
+
+    // Read sub-range
+    assert(storage.read_range(off2 + 6, 6, out, err));
+    assert(out == "Record");
+
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
+void test_storage_empty_content() {
+    std::cout << "Running test_storage_empty_content... ";
+    std::string base_dir = create_test_temp_dir();
+
+    pisf::BlobStorage storage(base_dir, "data.blob");
+    std::string err;
+    assert(storage.init(err));
+
+    uint64_t off = 999, len = 999;
+    assert(storage.append("", off, len, err));
+    assert(off == 0 && len == 0);
+    assert(storage.get_size() == 0);
+
+    std::string out = "initial";
+    assert(storage.read_range(0, 0, out, err));
+    assert(out.empty());
+
+    // Append non-empty, then empty again
+    assert(storage.append("data", off, len, err));
+    assert(off == 0 && len == 4);
+
+    assert(storage.append("", off, len, err));
+    assert(off == 4 && len == 0);
+    assert(storage.get_size() == 4);
+
+    assert(storage.read_range(4, 0, out, err));
+    assert(out.empty());
+
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
+void test_storage_invalid_ranges_and_errors() {
+    std::cout << "Running test_storage_invalid_ranges_and_errors... ";
+    std::string base_dir = create_test_temp_dir();
+
+    pisf::BlobStorage storage(base_dir, "data.blob");
+    std::string err;
+    assert(storage.init(err));
+
+    uint64_t off = 0, len = 0;
+    assert(storage.append("SampleData", off, len, err)); // size is 10
+
+    std::string out;
+    // Offset out of bounds
+    assert(!storage.read_range(11, 1, out, err));
+    assert(!err.empty());
+
+    // Range extends past end of blob
+    assert(!storage.read_range(5, 10, out, err));
+    assert(!err.empty());
+
+    // Offset + length overflow
+    assert(!storage.read_range(UINT64_MAX - 2, 5, out, err));
+    assert(!err.empty());
+
+    // Closed storage operations
+    storage.close();
+    assert(!storage.append("more", off, len, err));
+    assert(!storage.read_range(0, 5, out, err));
+
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
 } // namespace
 
 int main() {
@@ -125,6 +258,10 @@ int main() {
     test_storage_init_existing_blob();
     test_storage_init_error_handling();
     test_storage_move_semantics();
+    test_storage_append_and_read_single();
+    test_storage_append_and_read_multiple();
+    test_storage_empty_content();
+    test_storage_invalid_ranges_and_errors();
     std::cout << "All persistent storage unit tests passed successfully!\n";
     return 0;
 }

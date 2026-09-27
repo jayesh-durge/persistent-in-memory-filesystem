@@ -118,4 +118,111 @@ uint64_t BlobStorage::get_size() const {
     return static_cast<uint64_t>(st.st_size);
 }
 
+bool BlobStorage::append(const std::string& data, uint64_t& out_offset, uint64_t& out_length, std::string& err_msg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fd_ < 0) {
+        err_msg = "Storage blob is not open";
+        return false;
+    }
+
+    struct stat st{};
+    if (::fstat(fd_, &st) != 0) {
+        err_msg = "fstat() failed: " + std::string(std::strerror(errno));
+        return false;
+    }
+
+    uint64_t current_size = static_cast<uint64_t>(st.st_size);
+    out_offset = current_size;
+    out_length = static_cast<uint64_t>(data.size());
+
+    if (data.empty()) {
+        return true;
+    }
+
+    if (current_size > UINT64_MAX - out_length) {
+        err_msg = "Append would overflow maximum file size limit";
+        return false;
+    }
+
+    off_t write_off = static_cast<off_t>(current_size);
+    const char* ptr = data.data();
+    size_t remaining = data.size();
+
+    while (remaining > 0) {
+        ssize_t written = ::pwrite(fd_, ptr, remaining, write_off);
+        if (written > 0) {
+            ptr += written;
+            remaining -= static_cast<size_t>(written);
+            write_off += written;
+        } else if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            err_msg = "pwrite() failed on blob: " + std::string(std::strerror(errno));
+            return false;
+        } else {
+            err_msg = "pwrite() returned 0 unexpectedly";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool BlobStorage::read_range(uint64_t offset, uint64_t length, std::string& out_data, std::string& err_msg) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fd_ < 0) {
+        err_msg = "Storage blob is not open";
+        return false;
+    }
+
+    if (offset > UINT64_MAX - length) {
+        err_msg = "ERR invalid range: offset + length overflows";
+        return false;
+    }
+
+    struct stat st{};
+    if (::fstat(fd_, &st) != 0) {
+        err_msg = "fstat() failed: " + std::string(std::strerror(errno));
+        return false;
+    }
+
+    uint64_t total_size = static_cast<uint64_t>(st.st_size);
+    if (offset > total_size || offset + length > total_size) {
+        err_msg = "ERR invalid range: offset " + std::to_string(offset) + " + length " +
+                  std::to_string(length) + " exceeds blob size " + std::to_string(total_size);
+        return false;
+    }
+
+    if (length == 0) {
+        out_data.clear();
+        return true;
+    }
+
+    out_data.resize(length);
+    char* ptr = out_data.data();
+    size_t remaining = length;
+    off_t read_off = static_cast<off_t>(offset);
+
+    while (remaining > 0) {
+        ssize_t n_read = ::pread(fd_, ptr, remaining, read_off);
+        if (n_read > 0) {
+            ptr += n_read;
+            remaining -= static_cast<size_t>(n_read);
+            read_off += n_read;
+        } else if (n_read == 0) {
+            err_msg = "pread() reached unexpected EOF";
+            return false;
+        } else {
+            if (errno == EINTR) {
+                continue;
+            }
+            err_msg = "pread() failed on blob: " + std::string(std::strerror(errno));
+            return false;
+        }
+    }
+
+    return true;
+}
+
 } // namespace pisf
