@@ -19,6 +19,7 @@ fi
 # Set up isolated temporary test environment
 TEST_TMP_DIR=$(mktemp -d /tmp/pisf-test.XXXXXX)
 TEST_SOCK="${TEST_TMP_DIR}/test.sock"
+TEST_DATA_DIR="${TEST_TMP_DIR}/storage"
 SERVER_PID=""
 
 # Ensure cleanup on any exit
@@ -48,10 +49,11 @@ echo "=========================================================="
 echo " Running PISF Client-Server Concurrency & Smoke Tests"
 echo " Build directory: ${BUILD_DIR}"
 echo " Test socket:     ${TEST_SOCK}"
+echo " Storage dir:     ${TEST_DATA_DIR}"
 echo "=========================================================="
 
 # Test 1: Client connection failure handling when server is unavailable
-echo -n "[Test 1/18] Client connection failure when server is unavailable... "
+echo -n "[Test 1/19] Client connection failure when server is unavailable... "
 if "${CLIENT_BIN}" -s "${TEST_SOCK}" >/dev/null 2>&1; then
     echo "FAILED (client should have failed when server is down)"
     exit 1
@@ -59,8 +61,8 @@ fi
 echo "PASSED"
 
 # Test 2: Server startup, Unix domain socket creation, and single PING/PONG
-echo -n "[Test 2/18] Server startup and single PING/PONG... "
-"${SERVER_BIN}" -s "${TEST_SOCK}" >"${TEST_TMP_DIR}/server.log" 2>&1 &
+echo -n "[Test 2/19] Server startup and single PING/PONG... "
+"${SERVER_BIN}" -s "${TEST_SOCK}" -d "${TEST_DATA_DIR}" >"${TEST_TMP_DIR}/server.log" 2>&1 &
 SERVER_PID=$!
 
 if ! wait_for_server "${TEST_TMP_DIR}/server.log"; then
@@ -77,7 +79,7 @@ fi
 echo "PASSED"
 
 # Test 3: Multi-command session, unknown command handling, and QUIT
-echo -n "[Test 3/18] Multi-command session, unknown command, and QUIT... "
+echo -n "[Test 3/19] Multi-command session, unknown command, and QUIT... "
 SESSION_OUTPUT=$(printf "PING\nNON_EXISTENT_CMD\nPING\nQUIT\n" | "${CLIENT_BIN}" -s "${TEST_SOCK}")
 
 if ! echo "${SESSION_OUTPUT}" | grep -q "\[Response\] PONG"; then
@@ -95,15 +97,15 @@ fi
 echo "PASSED"
 
 # Test 4: Prevent duplicate server on active socket
-echo -n "[Test 4/18] Duplicate server refused on active socket... "
-if "${SERVER_BIN}" -s "${TEST_SOCK}" >/dev/null 2>&1; then
+echo -n "[Test 4/19] Duplicate server refused on active socket... "
+if "${SERVER_BIN}" -s "${TEST_SOCK}" -d "${TEST_DATA_DIR}" >/dev/null 2>&1; then
     echo "FAILED (second server should have been refused)"
     exit 1
 fi
 echo "PASSED"
 
 # Test 5: Client A remains idle while Client B connects and executes PING
-echo -n "[Test 5/18] Idle Client A does not block concurrent Client B... "
+echo -n "[Test 5/19] Idle Client A does not block concurrent Client B... "
 # Client A connects and sits idle holding the connection
 python3 -c "
 import socket, time
@@ -144,7 +146,7 @@ wait "${PYTHON_CLIENT_A_PID}"
 echo "PASSED"
 
 # Test 6: Multiple concurrent clients issuing commands without response mixing
-echo -n "[Test 6/18] 5 concurrent clients issuing multiple commands... "
+echo -n "[Test 6/19] 5 concurrent clients issuing multiple commands... "
 PIDS=()
 for i in {1..5}; do
     (
@@ -168,7 +170,7 @@ done
 echo "PASSED"
 
 # Test 7: QUIT closes only requesting client session; server remains available
-echo -n "[Test 7/18] QUIT closes only requesting client... "
+echo -n "[Test 7/19] QUIT closes only requesting client... "
 QUIT_RESP=$("${CLIENT_BIN}" -s "${TEST_SOCK}" QUIT)
 if ! echo "${QUIT_RESP}" | grep -q "\[Response\] BYE"; then
     echo "FAILED (QUIT did not return BYE)"
@@ -184,7 +186,7 @@ fi
 echo "PASSED"
 
 # Test 8: Abrupt client disconnect handled cleanly
-echo -n "[Test 8/18] Abrupt client disconnect handled cleanly... "
+echo -n "[Test 8/19] Abrupt client disconnect handled cleanly... "
 python3 -c "
 import socket
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -201,7 +203,7 @@ fi
 echo "PASSED"
 
 # Test 9: Root initialization, directory/file creation, sorted listing, and STAT metadata
-echo -n "[Test 9/18] Filesystem tree creation, listing, sorting, and STAT... "
+echo -n "[Test 9/19] Filesystem tree creation, listing, sorting, and STAT... "
 ROOT_STAT=$("${CLIENT_BIN}" -s "${TEST_SOCK}" STAT /)
 if ! echo "${ROOT_STAT}" | grep -q "\[Response\] name=/ type=directory id=1"; then
     echo "FAILED (unexpected root stat: ${ROOT_STAT})"
@@ -275,7 +277,7 @@ fi
 echo "PASSED"
 
 # Test 10: Filesystem error handling (missing paths, non-directories, duplicate names)
-echo -n "[Test 10/18] Filesystem error handling (missing, non-directory, duplicates)... "
+echo -n "[Test 10/19] Filesystem error handling (missing, non-directory, duplicates)... "
 # Missing paths
 LS_MISSING=$("${CLIENT_BIN}" -s "${TEST_SOCK}" LS /missing)
 if ! echo "${LS_MISSING}" | grep -q "\[Response\] ERR not found"; then
@@ -331,7 +333,7 @@ fi
 echo "PASSED"
 
 # Test 11: Invalid path syntax, normalization, and malformed commands
-echo -n "[Test 11/18] Invalid path syntax, normalization, and malformed commands... "
+echo -n "[Test 11/19] Invalid path syntax, normalization, and malformed commands... "
 # Relative path rejection
 REL_MKDIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" MKDIR relative/path)
 if ! echo "${REL_MKDIR}" | grep -q "\[Response\] ERR invalid path"; then
@@ -391,7 +393,7 @@ fi
 echo "PASSED"
 
 # Test 12: Concurrent clients creating identical path (contested race condition)
-echo -n "[Test 12/18] Concurrent clients creating identical path (contested race)... "
+echo -n "[Test 12/19] Concurrent clients creating identical path (contested race)... "
 RACE_PIDS=()
 for i in {1..10}; do
     "${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /race_file.txt >"${TEST_TMP_DIR}/race_${i}.log" 2>&1 &
@@ -419,7 +421,7 @@ fi
 echo "PASSED"
 
 # Test 13: Concurrent independent filesystem operations without corruption
-echo -n "[Test 13/18] Concurrent independent filesystem operations... "
+echo -n "[Test 13/19] Concurrent independent filesystem operations... "
 CONC_FS_PIDS=()
 for c in {1..6}; do
     (
@@ -443,7 +445,7 @@ done
 echo "PASSED"
 
 # Test 14: File WRITE and READ operations over socket
-echo -n "[Test 14/18] File content operations (empty read, write, read, replace, spaces)... "
+echo -n "[Test 14/19] File content operations (empty read, write, read, replace, spaces)... "
 "${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /test_content.txt >/dev/null
 
 # 1. Read newly created empty file
@@ -485,7 +487,7 @@ fi
 echo "PASSED"
 
 # Test 15: File content error handling (missing, directory, missing args, newlines)
-echo -n "[Test 15/18] File content error handling (missing, directory, malformed, newlines)... "
+echo -n "[Test 15/19] File content error handling (missing, directory, malformed, newlines)... "
 # Missing file
 READ_MISSING=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /missing_file.txt)
 if ! echo "${READ_MISSING}" | grep -q "\[Response\] ERR not found"; then
@@ -534,7 +536,7 @@ fi
 echo "PASSED"
 
 # Test 16: Concurrent clients reading and writing the same file over sockets
-echo -n "[Test 16/18] Concurrent socket clients reading and writing same file... "
+echo -n "[Test 16/19] Concurrent socket clients reading and writing same file... "
 "${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /concurrent_file.txt >/dev/null
 "${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /concurrent_file.txt "SEED_PAYLOAD" >/dev/null
 
@@ -586,7 +588,7 @@ done
 echo "PASSED"
 
 # Test 17: Graceful server shutdown via SHUTDOWN command with an idle client connected
-echo -n "[Test 17/18] SHUTDOWN unblocks idle client and cleans up... "
+echo -n "[Test 17/19] SHUTDOWN unblocks idle client and cleans up... "
 # Start an idle client that sits blocked on recv()
 python3 -c "
 import socket
@@ -628,7 +630,7 @@ fi
 echo "PASSED"
 
 # Test 18: Stale socket recovery and SIGTERM shutdown with an idle client connected
-echo -n "[Test 18/18] Stale socket recovery and SIGTERM shutdown with idle client... "
+echo -n "[Test 18/19] Stale socket recovery and SIGTERM shutdown with idle client... "
 # Create an orphaned socket file
 python3 -c "import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind('${TEST_SOCK}'); s.close()"
 if [[ ! -S "${TEST_SOCK}" ]]; then
@@ -637,7 +639,7 @@ if [[ ! -S "${TEST_SOCK}" ]]; then
 fi
 
 # Server should detect stale socket, remove it, bind, and listen successfully
-"${SERVER_BIN}" -s "${TEST_SOCK}" >"${TEST_TMP_DIR}/server_stale.log" 2>&1 &
+"${SERVER_BIN}" -s "${TEST_SOCK}" -d "${TEST_DATA_DIR}" >"${TEST_TMP_DIR}/server_stale.log" 2>&1 &
 SERVER_PID=$!
 
 if ! wait_for_server "${TEST_TMP_DIR}/server_stale.log"; then
@@ -674,6 +676,94 @@ SERVER_PID=""
 
 if [[ -e "${TEST_SOCK}" ]]; then
     echo "FAILED (socket file remained after SIGTERM shutdown)"
+    exit 1
+fi
+echo "PASSED"
+
+# Test 19: Persistent blob content survives server restart (namespace is in-memory only)
+echo -n "[Test 19/19] Persistent blob survives server restart and preserves bytes... "
+RESTART_DATA_DIR="${TEST_TMP_DIR}/restart_storage"
+RESTART_SOCK="${TEST_TMP_DIR}/restart.sock"
+
+# 1. Start server instance 1
+"${SERVER_BIN}" -s "${RESTART_SOCK}" -d "${RESTART_DATA_DIR}" >"${TEST_TMP_DIR}/server_restart1.log" 2>&1 &
+RESTART_SRV_PID=$!
+if ! wait_for_server "${TEST_TMP_DIR}/server_restart1.log"; then
+    echo "FAILED (restart server 1 failed to start)"
+    cat "${TEST_TMP_DIR}/server_restart1.log"
+    exit 1
+fi
+
+# 2. Create file and write content
+"${CLIENT_BIN}" -s "${RESTART_SOCK}" CREATE /restart_doc.txt >/dev/null
+WRITE1_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" WRITE /restart_doc.txt PersistentContent12345)
+if ! echo "${WRITE1_OUT}" | grep -q "\[Response\] OK"; then
+    echo "FAILED (initial write failed: ${WRITE1_OUT})"
+    exit 1
+fi
+
+READ1_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" READ /restart_doc.txt)
+if ! echo "${READ1_OUT}" | grep -q "\[Response\] PersistentContent12345"; then
+    echo "FAILED (initial read failed: ${READ1_OUT})"
+    exit 1
+fi
+
+# 3. Cleanly shut down server 1
+"${CLIENT_BIN}" -s "${RESTART_SOCK}" SHUTDOWN >/dev/null 2>&1 || true
+wait "${RESTART_SRV_PID}" 2>/dev/null || true
+
+# 4. Verify blob exists on disk and contains written bytes
+BLOB_FILE="${RESTART_DATA_DIR}/data.blob"
+if [[ ! -f "${BLOB_FILE}" ]]; then
+    echo "FAILED (data.blob missing on disk after shutdown)"
+    exit 1
+fi
+if ! grep -q "PersistentContent12345" "${BLOB_FILE}"; then
+    echo "FAILED (data.blob does not contain written bytes on disk)"
+    exit 1
+fi
+
+# 5. Start server instance 2 (simulating restart)
+"${SERVER_BIN}" -s "${RESTART_SOCK}" -d "${RESTART_DATA_DIR}" >"${TEST_TMP_DIR}/server_restart2.log" 2>&1 &
+RESTART_SRV_PID=$!
+if ! wait_for_server "${TEST_TMP_DIR}/server_restart2.log"; then
+    echo "FAILED (restart server 2 failed to start)"
+    cat "${TEST_TMP_DIR}/server_restart2.log"
+    exit 1
+fi
+
+# 6. Verify in-memory namespace limitation: tree is reset on restart
+READ_RESET_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" READ /restart_doc.txt 2>&1 || true)
+if ! echo "${READ_RESET_OUT}" | grep -q "ERR not found"; then
+    echo "FAILED (expected ERR not found due to in-memory namespace limitation, got: ${READ_RESET_OUT})"
+    exit 1
+fi
+
+# 7. Create a new file in session 2 and append additional content
+"${CLIENT_BIN}" -s "${RESTART_SOCK}" CREATE /restart_doc.txt >/dev/null
+WRITE2_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" WRITE /restart_doc.txt NewAppendedBytes67890)
+if ! echo "${WRITE2_OUT}" | grep -q "\[Response\] OK"; then
+    echo "FAILED (post-restart write failed: ${WRITE2_OUT})"
+    exit 1
+fi
+
+READ2_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" READ /restart_doc.txt)
+if ! echo "${READ2_OUT}" | grep -q "\[Response\] NewAppendedBytes67890"; then
+    echo "FAILED (post-restart read failed: ${READ2_OUT})"
+    exit 1
+fi
+
+# 8. Shut down server 2
+"${CLIENT_BIN}" -s "${RESTART_SOCK}" SHUTDOWN >/dev/null 2>&1 || true
+wait "${RESTART_SRV_PID}" 2>/dev/null || true
+
+# 9. Verify on disk that both session 1 and session 2 bytes are preserved in data.blob
+if ! grep -q "PersistentContent12345" "${BLOB_FILE}"; then
+    echo "FAILED (original content lost from data.blob)"
+    exit 1
+fi
+if ! grep -q "NewAppendedBytes67890" "${BLOB_FILE}"; then
+    echo "FAILED (new content missing from data.blob)"
     exit 1
 fi
 echo "PASSED"

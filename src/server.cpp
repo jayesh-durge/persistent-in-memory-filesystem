@@ -81,8 +81,9 @@ void setup_signal_handlers() {
 void print_usage(const char* prog_name) {
     std::cout << "Usage: " << prog_name << " [options]\n"
               << "Options:\n"
-              << "  -s, --socket <path>   Set Unix domain socket path\n"
-              << "  -h, --help            Show this help message\n";
+              << "  -s, --socket <path>     Set Unix domain socket path\n"
+              << "  -d, --data-dir <path>   Set persistent storage directory\n"
+              << "  -h, --help              Show this help message\n";
 }
 
 // Dispatches a single client command. Returns false if the client session should terminate.
@@ -311,6 +312,7 @@ void prune_finished_workers(std::vector<WorkerRecord>& workers) {
 int main(int argc, char* argv[]) {
     std::cout << std::unitbuf;
     std::string socket_path = pisf::get_default_socket_path();
+    std::string data_dir = pisf::get_default_storage_dir();
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -319,11 +321,19 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if ((arg == "-s" || arg == "--socket") && i + 1 < argc) {
             socket_path = argv[++i];
+        } else if ((arg == "-d" || arg == "--data-dir") && i + 1 < argc) {
+            data_dir = argv[++i];
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             print_usage(argv[0]);
             return 1;
         }
+    }
+
+    std::string storage_err;
+    if (!g_fs.init_storage(data_dir, storage_err)) {
+        std::cerr << "[Error] Failed to initialize storage directory '" << data_dir << "': " << storage_err << "\n";
+        return 1;
     }
 
     setup_signal_handlers();
@@ -335,7 +345,8 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "=== PISF Server (Persistent Filesystem Daemon) ===\n"
-              << "Socket path: " << socket_path << "\n";
+              << "Socket path:  " << socket_path << "\n"
+              << "Storage path: " << (g_fs.storage() ? g_fs.storage()->data_dir() : data_dir) << "\n";
 
     // Check for existing socket file and handle stale socket safely
     std::string err;

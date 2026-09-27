@@ -250,6 +250,60 @@ void test_storage_invalid_ranges_and_errors() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_restart_preserves_content_and_appends() {
+    std::cout << "Running test_storage_restart_preserves_content_and_appends... ";
+    std::string base_dir = create_test_temp_dir();
+
+    std::string session1_data = "PersistedContentSessionOne";
+    uint64_t off1 = 999, len1 = 999;
+    std::string err;
+
+    // Session 1: initialize, write bytes, then simulate process shutdown via close
+    {
+        pisf::BlobStorage storage1(base_dir, "data.blob");
+        assert(storage1.init(err));
+        assert(storage1.append(session1_data, off1, len1, err));
+        assert(off1 == 0 && len1 == session1_data.size());
+        storage1.close();
+    }
+
+    // Verify blob exists on disk and is non-empty after process stop
+    std::string blob_path = base_dir + "/data.blob";
+    assert(std::filesystem::exists(blob_path));
+    assert(std::filesystem::file_size(blob_path) == session1_data.size());
+
+    // Session 2: simulate restart by creating a new BlobStorage instance reopening the directory
+    std::string session2_data = "AppendedInSessionTwo";
+    uint64_t off2 = 999, len2 = 999;
+    {
+        pisf::BlobStorage storage2(base_dir, "data.blob");
+        assert(storage2.init(err));
+        assert(storage2.get_size() == session1_data.size());
+
+        // Verify previous session bytes survived and are readable
+        std::string read_s1;
+        assert(storage2.read_range(off1, len1, read_s1, err));
+        assert(read_s1 == session1_data);
+
+        // New write after restart should append at end of file
+        assert(storage2.append(session2_data, off2, len2, err));
+        assert(off2 == session1_data.size());
+        assert(len2 == session2_data.size());
+        assert(storage2.get_size() == session1_data.size() + session2_data.size());
+
+        // Verify both sessions' bytes are intact and independently readable
+        std::string read_s2;
+        assert(storage2.read_range(off2, len2, read_s2, err));
+        assert(read_s2 == session2_data);
+
+        assert(storage2.read_range(off1, len1, read_s1, err));
+        assert(read_s1 == session1_data);
+    }
+
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
 } // namespace
 
 int main() {
@@ -262,6 +316,7 @@ int main() {
     test_storage_append_and_read_multiple();
     test_storage_empty_content();
     test_storage_invalid_ranges_and_errors();
+    test_storage_restart_preserves_content_and_appends();
     std::cout << "All persistent storage unit tests passed successfully!\n";
     return 0;
 }
