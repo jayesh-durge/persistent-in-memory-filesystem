@@ -139,6 +139,161 @@ bool MetadataSerializer::serialize(const MetadataState& state, std::string& out_
     return true;
 }
 
+bool MetadataSerializer::deserialize(const std::string& bytes, MetadataState& out_state, std::string& err_msg) {
+    constexpr size_t HEADER_SIZE = 4 + 4 + 4 + 8 + 8; // 28 bytes
+    constexpr size_t TRAILER_SIZE = 4; // 4 bytes CRC
+    constexpr size_t MIN_SIZE = HEADER_SIZE + TRAILER_SIZE; // 32 bytes
+
+    if (bytes.size() < MIN_SIZE) {
+        err_msg = "ERR invalid metadata: file size too small (truncated)";
+        return false;
+    }
+
+    // 1. Verify CRC32 trailer before parsing contents
+    size_t data_len = bytes.size() - TRAILER_SIZE;
+    uint32_t expected_crc = compute_crc32(reinterpret_cast<const uint8_t*>(bytes.data()), data_len);
+
+    const char* trailer_ptr = bytes.data() + data_len;
+    const char* trailer_end = bytes.data() + bytes.size();
+    uint32_t stored_crc = 0;
+    if (!read_u32_le(trailer_ptr, trailer_end, stored_crc)) {
+        err_msg = "ERR invalid metadata: failed to read checksum trailer";
+        return false;
+    }
+
+    if (stored_crc != expected_crc) {
+        err_msg = "ERR invalid metadata: checksum mismatch (corrupted metadata)";
+        return false;
+    }
+
+    const char* ptr = bytes.data();
+    const char* end = bytes.data() + data_len;
+
+    // 2. Parse Header
+    uint32_t magic = 0;
+    if (!read_u32_le(ptr, end, magic) || magic != MAGIC_HEADER) {
+        err_msg = "ERR invalid metadata: invalid magic header";
+        return false;
+    }
+
+    uint32_t version = 0;
+    if (!read_u32_le(ptr, end, version)) {
+        err_msg = "ERR invalid metadata: failed to read format version";
+        return false;
+    }
+    if (version != CURRENT_VERSION) {
+        err_msg = "ERR unsupported metadata version: " + std::to_string(version);
+        return false;
+    }
+
+    uint32_t flags = 0;
+    if (!read_u32_le(ptr, end, flags)) {
+        err_msg = "ERR invalid metadata: failed to read flags";
+        return false;
+    }
+
+    uint64_t node_count = 0;
+    if (!read_u64_le(ptr, end, node_count)) {
+        err_msg = "ERR invalid metadata: failed to read node count";
+        return false;
+    }
+    if (node_count > MAX_NODE_COUNT) {
+        err_msg = "ERR invalid metadata: unreasonable node count " + std::to_string(node_count);
+        return false;
+    }
+
+    uint64_t next_node_id = 0;
+    if (!read_u64_le(ptr, end, next_node_id)) {
+        err_msg = "ERR invalid metadata: failed to read next node id";
+        return false;
+    }
+
+    MetadataState state;
+    state.next_node_id = next_node_id;
+
+    // 3. Parse Node records
+    for (uint64_t i = 0; i < node_count; ++i) {
+        Node node;
+
+        if (!read_u64_le(ptr, end, node.id)) {
+            err_msg = "ERR invalid metadata: truncated node id at record " + std::to_string(i);
+            return false;
+        }
+
+        uint64_t parent_id_val = 0;
+        if (!read_u64_le(ptr, end, parent_id_val)) {
+            err_msg = "ERR invalid metadata: truncated parent id at record " + std::to_string(i);
+            return false;
+        }
+        if (parent_id_val != 0) {
+            node.parent_id = parent_id_val;
+        } else {
+            node.parent_id = std::nullopt;
+        }
+
+        uint8_t type_val = 0;
+        if (!read_u8(ptr, end, type_val)) {
+            err_msg = "ERR invalid metadata: truncated node type at record " + std::to_string(i);
+            return false;
+        }
+        if (type_val == 1u) {
+            node.type = NodeType::Directory;
+        } else if (type_val == 2u) {
+            node.type = NodeType::File;
+        } else {
+            err_msg = "ERR invalid metadata: unknown node type " + std::to_string(type_val);
+            return false;
+        }
+
+        uint32_t name_len = 0;
+        if (!read_u32_le(ptr, end, name_len)) {
+            err_msg = "ERR invalid metadata: truncated name length at record " + std::to_string(i);
+            return false;
+        }
+        if (name_len > MAX_NAME_LENGTH) {
+            err_msg = "ERR invalid metadata: excessive name length " + std::to_string(name_len);
+            return false;
+        }
+        if (static_cast<size_t>(end - ptr) < name_len) {
+            err_msg = "ERR invalid metadata: truncated name string at record " + std::to_string(i);
+            return false;
+        }
+        node.name.assign(ptr, name_len);
+        ptr += name_len;
+
+        if (!read_u64_le(ptr, end, node.content_offset)) {
+            err_msg = "ERR invalid metadata: truncated content offset at record " + std::to_string(i);
+            return false;
+        }
+
+        if (!read_u64_le(ptr, end, node.content_length)) {
+            err_msg = "ERR invalid metadata: truncated content length at record " + std::to_string(i);
+            return false;
+        }
+
+        if (state.nodes.find(node.id) != state.nodes.end()) {
+            err_msg = "ERR invalid metadata: duplicate node id " + std::to_string(node.id);
+            return false;
+        }
+
+        state.nodes[node.id] = std::move(node);
+    }
+
+    // 4. Ensure all record bytes were consumed exactly
+    if (ptr != end) {
+        err_msg = "ERR invalid metadata: unexpected trailing data in records";
+        return false;
+    }
+
+    // 5. Perform structural and hierarchy validation
+    if (!validate(state, err_msg)) {
+        return false;
+    }
+
+    out_state = std::move(state);
+    return true;
+}
+
 bool MetadataSerializer::validate(MetadataState& state, std::string& err_msg, std::optional<uint64_t> max_blob_size) {
     // 1. Root node checks
     auto root_it = state.nodes.find(ROOT_NODE_ID);

@@ -36,6 +36,7 @@ add_executable(pisf-server
     src/server.cpp
     src/filesystem.cpp
     src/storage.cpp
+    src/metadata.cpp
 )
 target_link_libraries(pisf-server PRIVATE pisf_compiler_flags Threads::Threads)
 
@@ -59,10 +60,24 @@ add_test(
     COMMAND storage_test
 )
 
+add_executable(metadata_test
+    tests/metadata_test.cpp
+    src/metadata.cpp
+    src/filesystem.cpp
+    src/storage.cpp
+)
+target_link_libraries(metadata_test PRIVATE pisf_compiler_flags Threads::Threads)
+
+add_test(
+    NAME metadata_test
+    COMMAND metadata_test
+)
+
 add_executable(filesystem_test
     tests/filesystem_test.cpp
     src/filesystem.cpp
     src/storage.cpp
+    src/metadata.cpp
 )
 target_link_libraries(filesystem_test PRIVATE pisf_compiler_flags Threads::Threads)
 
