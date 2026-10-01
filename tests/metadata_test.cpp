@@ -2,8 +2,11 @@
 
 #include <cassert>
 #include <climits>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
+#include <sys/stat.h>
 
 namespace {
 
@@ -349,6 +352,115 @@ void test_invalid_names() {
     std::cout << "PASSED\n";
 }
 
+void test_safe_replacement_preserves_previous_file_on_failure() {
+    std::cout << "Running test_safe_replacement_preserves_previous_file_on_failure... ";
+    std::string path_template = "/tmp/pisf-meta-saferep-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    pisf::MetadataState state1 = create_valid_state();
+    std::string err;
+    assert(pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state1, err));
+
+    std::string meta_path = temp_dir + "/metadata.pisf";
+    std::ifstream in1(meta_path, std::ios::binary);
+    std::string original_content((std::istreambuf_iterator<char>(in1)), std::istreambuf_iterator<char>());
+    assert(!original_content.empty());
+
+    // Try to save an invalid state (fails serialization/validation)
+    pisf::MetadataState invalid_state = state1;
+    invalid_state.next_node_id = 1; // invalid!
+    assert(!pisf::MetadataSerializer::save_to_file_atomic(temp_dir, invalid_state, err));
+
+    // Verify metadata.pisf is completely intact and unchanged
+    std::ifstream in2(meta_path, std::ios::binary);
+    std::string after_content((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    assert(after_content == original_content);
+
+    // Verify no temporary files were left behind
+    for (const auto& entry : std::filesystem::directory_iterator(temp_dir)) {
+        assert(entry.path().filename().string().find(".tmp.") == std::string::npos);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_safe_replacement_atomic_update() {
+    std::cout << "Running test_safe_replacement_atomic_update... ";
+    std::string path_template = "/tmp/pisf-meta-atomic-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    pisf::MetadataState state1 = create_valid_state();
+    std::string err;
+    assert(pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state1, err));
+
+    // Create state2 by adding another node
+    pisf::MetadataState state2 = state1;
+    pisf::Node n4;
+    n4.id = 4;
+    n4.name = "second.txt";
+    n4.type = pisf::NodeType::File;
+    n4.parent_id = 2;
+    state2.nodes[4] = n4;
+    state2.next_node_id = 5;
+
+    assert(pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state2, err));
+
+    pisf::MetadataState loaded;
+    assert(pisf::MetadataSerializer::load_from_file(temp_dir, loaded, err));
+    assert(loaded.nodes.size() == 4);
+    assert(loaded.next_node_id == 5);
+    assert(loaded.nodes.count(4) == 1);
+
+    // Verify no temporary files were left behind
+    for (const auto& entry : std::filesystem::directory_iterator(temp_dir)) {
+        assert(entry.path().filename().string().find(".tmp.") == std::string::npos);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_safe_replacement_unwritable_directory() {
+    std::cout << "Running test_safe_replacement_unwritable_directory... ";
+    std::string path_template = "/tmp/pisf-meta-ro-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    // Save initial state while directory is writable
+    pisf::MetadataState state1 = create_valid_state();
+    std::string err;
+    assert(pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state1, err));
+
+    std::string meta_path = temp_dir + "/metadata.pisf";
+    std::ifstream in1(meta_path, std::ios::binary);
+    std::string original_content((std::istreambuf_iterator<char>(in1)), std::istreambuf_iterator<char>());
+
+    // Make directory read-only
+    assert(::chmod(temp_dir.c_str(), 0555) == 0);
+
+    pisf::MetadataState state2 = state1;
+    state2.next_node_id = 10;
+    // Attempt save should fail because tmp file cannot be created
+    assert(!pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state2, err));
+
+    // Restore permissions
+    assert(::chmod(temp_dir.c_str(), 0755) == 0);
+
+    // Verify previous metadata.pisf is still intact
+    std::ifstream in2(meta_path, std::ios::binary);
+    std::string after_content((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    assert(after_content == original_content);
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 } // namespace
 
 int main() {
@@ -367,6 +479,9 @@ int main() {
     test_cycle_and_disconnected_node_detection();
     test_next_node_id_validation();
     test_invalid_names();
+    test_safe_replacement_preserves_previous_file_on_failure();
+    test_safe_replacement_atomic_update();
+    test_safe_replacement_unwritable_directory();
 
     std::cout << "All metadata serialization tests passed successfully!\n";
     return 0;
