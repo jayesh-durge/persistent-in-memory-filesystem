@@ -25,12 +25,14 @@ Filesystem::~Filesystem() {
 }
 
 void Filesystem::init_ephemeral() {
+    is_ephemeral_ = true;
     std::string path_template = "/tmp/pisf-fs-XXXXXX";
     char* d = ::mkdtemp(path_template.data());
     if (d != nullptr) {
         ephemeral_dir_ = d;
         std::string err;
         init_storage(ephemeral_dir_, err);
+        is_ephemeral_ = true;
     } else {
         // Fallback: in-memory root if mkdtemp fails
         Node root;
@@ -46,6 +48,7 @@ void Filesystem::init_ephemeral() {
 
 bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg) {
     std::lock_guard<std::mutex> lock(mutex_);
+    is_ephemeral_ = false;
 
     // If we previously had an ephemeral directory, clean it up
     if (!ephemeral_dir_.empty() && ephemeral_dir_ != data_dir) {
@@ -162,13 +165,22 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
 }
 
 bool Filesystem::save_metadata_locked(std::string& err_msg) const {
-    if (data_dir_.empty()) {
+    if (simulate_metadata_failure_) {
+        err_msg = "simulated metadata persistence failure";
+        return false;
+    }
+    if (data_dir_.empty() || is_ephemeral_) {
         return true;
     }
     MetadataState state;
     state.next_node_id = next_node_id_;
     state.nodes = nodes_;
     return MetadataSerializer::save_to_file_atomic(data_dir_, state, err_msg);
+}
+
+void Filesystem::set_simulate_metadata_failure(bool simulate) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    simulate_metadata_failure_ = simulate;
 }
 
 const std::string& Filesystem::data_dir() const {
@@ -333,6 +345,14 @@ std::string Filesystem::mkdir(const std::string& path) {
     nodes_[new_id] = std::move(new_node);
     parent_node.children[target_name] = new_id;
 
+    std::string persist_err;
+    if (!save_metadata_locked(persist_err)) {
+        nodes_.erase(new_id);
+        parent_node.children.erase(target_name);
+        next_node_id_ = new_id;
+        return "ERR metadata persistence failed: " + persist_err;
+    }
+
     return "OK";
 }
 
@@ -380,6 +400,14 @@ std::string Filesystem::create(const std::string& path) {
 
     nodes_[new_id] = std::move(new_node);
     parent_node.children[target_name] = new_id;
+
+    std::string persist_err;
+    if (!save_metadata_locked(persist_err)) {
+        nodes_.erase(new_id);
+        parent_node.children.erase(target_name);
+        next_node_id_ = new_id;
+        return "ERR metadata persistence failed: " + persist_err;
+    }
 
     return "OK";
 }
@@ -507,8 +535,19 @@ std::string Filesystem::write(const std::string& path, const std::string& conten
             return "ERR not a file";
         }
 
+        uint64_t old_offset = node.content_offset;
+        uint64_t old_length = node.content_length;
+
         node.content_offset = offset;
         node.content_length = length;
+
+        std::string persist_err;
+        if (!save_metadata_locked(persist_err)) {
+            // Roll back in-memory extent to previous committed state
+            node.content_offset = old_offset;
+            node.content_length = old_length;
+            return "ERR metadata persistence failed: " + persist_err;
+        }
     }
 
     // 4. Return success only after the required write has completed successfully

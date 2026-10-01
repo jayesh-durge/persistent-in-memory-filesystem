@@ -68,6 +68,9 @@ public:
     bool is_initialized() const;
     const std::string& init_error() const;
 
+    // Test helper to simulate metadata persistence failure for rollback testing
+    void set_simulate_metadata_failure(bool simulate);
+
     // Syntactic path parsing helper (pure function, does not access filesystem state)
     static bool parse_path(const std::string& path, std::vector<std::string>& components, std::string& err_msg);
 
@@ -89,8 +92,10 @@ private:
     std::unique_ptr<BlobStorage> storage_;
     std::string data_dir_;
     std::string ephemeral_dir_;
+    bool is_ephemeral_{false};
     bool is_initialized_{false};
     std::string init_error_;
+    bool simulate_metadata_failure_{false};
 };
 
 } // namespace pisf

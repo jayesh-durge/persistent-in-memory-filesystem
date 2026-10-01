@@ -727,6 +727,108 @@ void test_filesystem_fresh_dir_creates_metadata_and_root() {
     std::cout << "PASSED\n";
 }
 
+void test_mutation_persistence() {
+    std::cout << "Running test_mutation_persistence... ";
+    std::string path_template = "/tmp/pisf-fs-mutpersist-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.mkdir("/notes") == "OK");
+        assert(fs.create("/notes/file1.txt") == "OK");
+        assert(fs.write("/notes/file1.txt", "ContentOne") == "OK");
+        assert(fs.create("/notes/file2.txt") == "OK");
+
+        // Verify on disk by loading metadata file directly
+        pisf::MetadataState on_disk;
+        std::string err;
+        assert(pisf::MetadataSerializer::load_from_file(temp_dir, on_disk, err));
+        assert(on_disk.nodes.size() == 4);
+        assert(on_disk.next_node_id == 5);
+
+        // Find file1
+        pisf::NodeId f1_id = 0;
+        for (const auto& [id, n] : on_disk.nodes) {
+            if (n.name == "file1.txt") {
+                f1_id = id;
+                assert(n.content_length == 10);
+            }
+        }
+        assert(f1_id != 0);
+    }
+
+    // Reopen filesystem from disk and verify everything persisted
+    {
+        pisf::Filesystem fs2(temp_dir);
+        assert(fs2.exists("/notes"));
+        assert(fs2.exists("/notes/file1.txt"));
+        assert(fs2.exists("/notes/file2.txt"));
+        assert(fs2.read("/notes/file1.txt") == "ContentOne");
+        assert(fs2.read("/notes/file2.txt").empty());
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_mutation_persistence_failure_rollback() {
+    std::cout << "Running test_mutation_persistence_failure_rollback... ";
+    std::string path_template = "/tmp/pisf-fs-rollback-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/doc.txt") == "OK");
+        assert(fs.write("/doc.txt", "InitialCommittedContent") == "OK");
+        assert(fs.read("/doc.txt") == "InitialCommittedContent");
+
+        // Enable simulated metadata failure
+        fs.set_simulate_metadata_failure(true);
+
+        // 1. MKDIR failure & rollback
+        std::string mkdir_res = fs.mkdir("/fail_dir");
+        assert(mkdir_res.find("ERR metadata persistence failed") != std::string::npos);
+        assert(!fs.exists("/fail_dir"));
+        assert(fs.ls("/").find("fail_dir") == std::string::npos);
+
+        // 2. CREATE failure & rollback
+        std::string create_res = fs.create("/fail_file.txt");
+        assert(create_res.find("ERR metadata persistence failed") != std::string::npos);
+        assert(!fs.exists("/fail_file.txt"));
+        assert(fs.ls("/").find("fail_file.txt") == std::string::npos);
+
+        // 3. WRITE failure & rollback of content reference
+        std::string write_res = fs.write("/doc.txt", "UncommittedNewContent");
+        assert(write_res.find("ERR metadata persistence failed") != std::string::npos);
+        // Previous content reference must not be lost
+        assert(fs.read("/doc.txt") == "InitialCommittedContent");
+
+        // Disable simulated failure
+        fs.set_simulate_metadata_failure(false);
+
+        // Successful mutation after recovery
+        assert(fs.create("/valid_file.txt") == "OK");
+        assert(fs.exists("/valid_file.txt"));
+    }
+
+    // Reopen filesystem to verify disk state reflects only successfully committed mutations
+    {
+        pisf::Filesystem fs2(temp_dir);
+        assert(fs2.exists("/doc.txt"));
+        assert(fs2.read("/doc.txt") == "InitialCommittedContent");
+        assert(fs2.exists("/valid_file.txt"));
+        assert(!fs2.exists("/fail_dir"));
+        assert(!fs2.exists("/fail_file.txt"));
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -756,6 +858,8 @@ int main() {
     test_filesystem_corrupted_metadata_rejected();
     test_filesystem_invalid_extent_exceeding_blob();
     test_filesystem_fresh_dir_creates_metadata_and_root();
+    test_mutation_persistence();
+    test_mutation_persistence_failure_rollback();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

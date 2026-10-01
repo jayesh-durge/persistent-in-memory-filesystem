@@ -732,15 +732,14 @@ if ! wait_for_server "${TEST_TMP_DIR}/server_restart2.log"; then
     exit 1
 fi
 
-# 6. Verify in-memory namespace limitation: tree is reset on restart
-READ_RESET_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" READ /restart_doc.txt 2>&1 || true)
-if ! echo "${READ_RESET_OUT}" | grep -q "ERR not found"; then
-    echo "FAILED (expected ERR not found due to in-memory namespace limitation, got: ${READ_RESET_OUT})"
+# 6. Verify persistent metadata: tree and file content survive restart
+READ_RESTORED_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" READ /restart_doc.txt 2>&1 || true)
+if ! echo "${READ_RESTORED_OUT}" | grep -q "\[Response\] PersistentContent12345"; then
+    echo "FAILED (expected PersistentContent12345 restored across restart, got: ${READ_RESTORED_OUT})"
     exit 1
 fi
 
-# 7. Create a new file in session 2 and append additional content
-"${CLIENT_BIN}" -s "${RESTART_SOCK}" CREATE /restart_doc.txt >/dev/null
+# 7. Update existing file in session 2 and verify appended content
 WRITE2_OUT=$("${CLIENT_BIN}" -s "${RESTART_SOCK}" WRITE /restart_doc.txt NewAppendedBytes67890)
 if ! echo "${WRITE2_OUT}" | grep -q "\[Response\] OK"; then
     echo "FAILED (post-restart write failed: ${WRITE2_OUT})"

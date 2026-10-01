@@ -525,13 +525,6 @@ bool MetadataSerializer::save_to_file_atomic(const std::string& data_dir, const 
         return false;
     }
 
-    // Attempt directory fsync to persist directory entry rename
-    int dir_fd = ::open(data_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (dir_fd >= 0) {
-        ::fsync(dir_fd);
-        ::close(dir_fd);
-    }
-
     return true;
 }
 
