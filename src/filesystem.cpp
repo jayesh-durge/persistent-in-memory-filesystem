@@ -1,37 +1,189 @@
 #include <pisf/filesystem.hpp>
+#include <pisf/metadata.hpp>
 
 #include <algorithm>
+#include <filesystem>
 
 #include <pisf/common.hpp>
 
 namespace pisf {
 
-Filesystem::Filesystem()
-    : Filesystem(get_default_storage_dir()) {
+Filesystem::Filesystem() {
+    init_ephemeral();
 }
 
-Filesystem::Filesystem(std::string data_dir)
-    : storage_(std::make_unique<BlobStorage>(std::move(data_dir))) {
+Filesystem::Filesystem(std::string data_dir) {
+    std::string err;
+    init_storage(data_dir, err);
+}
+
+Filesystem::~Filesystem() {
+    if (!ephemeral_dir_.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(ephemeral_dir_, ec);
+    }
+}
+
+void Filesystem::init_ephemeral() {
+    std::string path_template = "/tmp/pisf-fs-XXXXXX";
+    char* d = ::mkdtemp(path_template.data());
+    if (d != nullptr) {
+        ephemeral_dir_ = d;
+        std::string err;
+        init_storage(ephemeral_dir_, err);
+    } else {
+        // Fallback: in-memory root if mkdtemp fails
+        Node root;
+        root.id = ROOT_NODE_ID;
+        root.name = "/";
+        root.type = NodeType::Directory;
+        root.parent_id = std::nullopt;
+        nodes_[ROOT_NODE_ID] = std::move(root);
+        next_node_id_ = ROOT_NODE_ID + 1;
+        is_initialized_ = true;
+    }
+}
+
+bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // If we previously had an ephemeral directory, clean it up
+    if (!ephemeral_dir_.empty() && ephemeral_dir_ != data_dir) {
+        std::error_code ec;
+        std::filesystem::remove_all(ephemeral_dir_, ec);
+        ephemeral_dir_.clear();
+    }
+
+    if (data_dir.empty()) {
+        err_msg = "Storage directory cannot be empty";
+        is_initialized_ = false;
+        init_error_ = err_msg;
+        return false;
+    }
+
+    std::error_code ec;
+    std::filesystem::create_directories(data_dir, ec);
+    if (ec) {
+        err_msg = "Failed to create storage directory '" + data_dir + "': " + ec.message();
+        is_initialized_ = false;
+        init_error_ = err_msg;
+        return false;
+    }
+
+    std::string meta_path = (std::filesystem::path(data_dir) / "metadata.pisf").string();
+    std::string blob_path = (std::filesystem::path(data_dir) / "data.blob").string();
+
+    bool meta_exists = std::filesystem::is_regular_file(meta_path, ec);
+    bool blob_exists = std::filesystem::is_regular_file(blob_path, ec);
+
+    if (meta_exists) {
+        MetadataState state;
+        if (!MetadataSerializer::load_from_file(data_dir, state, err_msg)) {
+            is_initialized_ = false;
+            init_error_ = err_msg;
+            return false;
+        }
+
+        auto new_storage = std::make_unique<BlobStorage>(data_dir);
+        if (!new_storage->init(err_msg)) {
+            is_initialized_ = false;
+            init_error_ = err_msg;
+            return false;
+        }
+
+        uint64_t blob_size = new_storage->get_size();
+        if (!MetadataSerializer::validate(state, err_msg, blob_size)) {
+            is_initialized_ = false;
+            init_error_ = err_msg;
+            return false;
+        }
+
+        data_dir_ = data_dir;
+        nodes_ = std::move(state.nodes);
+        next_node_id_ = state.next_node_id;
+        storage_ = std::move(new_storage);
+        is_initialized_ = true;
+        init_error_.clear();
+        return true;
+    }
+
+    // Metadata file does not exist
+    if (blob_exists) {
+        err_msg = "ERR missing metadata: 'data.blob' exists in '" + data_dir +
+                  "' but 'metadata.pisf' is missing; refusing to initialize empty filesystem";
+        is_initialized_ = false;
+        init_error_ = err_msg;
+        return false;
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(data_dir, ec)) {
+        std::string filename = entry.path().filename().string();
+        if (!filename.empty() && filename[0] != '.') {
+            err_msg = "ERR missing metadata: storage directory '" + data_dir +
+                      "' is not empty but 'metadata.pisf' is missing; refusing to initialize empty filesystem";
+            is_initialized_ = false;
+            init_error_ = err_msg;
+            return false;
+        }
+    }
+
+    // Fresh directory: initialize fresh root and save initial metadata
+    nodes_.clear();
     Node root;
     root.id = ROOT_NODE_ID;
     root.name = "/";
     root.type = NodeType::Directory;
     root.parent_id = std::nullopt;
-
     nodes_[ROOT_NODE_ID] = std::move(root);
+    next_node_id_ = ROOT_NODE_ID + 1;
 
-    std::string err;
-    storage_->init(err);
-}
-
-bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg) {
-    std::lock_guard<std::mutex> lock(mutex_);
     auto new_storage = std::make_unique<BlobStorage>(data_dir);
     if (!new_storage->init(err_msg)) {
+        is_initialized_ = false;
+        init_error_ = err_msg;
         return false;
     }
+
+    data_dir_ = data_dir;
     storage_ = std::move(new_storage);
+
+    MetadataState initial_state;
+    initial_state.next_node_id = next_node_id_;
+    initial_state.nodes = nodes_;
+    if (!MetadataSerializer::save_to_file_atomic(data_dir_, initial_state, err_msg)) {
+        is_initialized_ = false;
+        init_error_ = err_msg;
+        return false;
+    }
+
+    is_initialized_ = true;
+    init_error_.clear();
     return true;
+}
+
+bool Filesystem::save_metadata_locked(std::string& err_msg) const {
+    if (data_dir_.empty()) {
+        return true;
+    }
+    MetadataState state;
+    state.next_node_id = next_node_id_;
+    state.nodes = nodes_;
+    return MetadataSerializer::save_to_file_atomic(data_dir_, state, err_msg);
+}
+
+const std::string& Filesystem::data_dir() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return data_dir_;
+}
+
+bool Filesystem::is_initialized() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return is_initialized_;
+}
+
+const std::string& Filesystem::init_error() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return init_error_;
 }
 
 const BlobStorage* Filesystem::storage() const {

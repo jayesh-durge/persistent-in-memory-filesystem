@@ -1,4 +1,5 @@
 #include <pisf/filesystem.hpp>
+#include <pisf/metadata.hpp>
 
 #include <atomic>
 #include <cassert>
@@ -541,6 +542,191 @@ void test_storage_backed_read_reflects_blob() {
     std::cout << "PASSED\n";
 }
 
+void test_filesystem_restore_from_metadata() {
+    std::cout << "Running test_filesystem_restore_from_metadata... ";
+    std::string path_template = "/tmp/pisf-fs-restore-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    // 1. Manually write data.blob
+    std::string content = "PersistentDocContent999";
+    std::string blob_path = temp_dir + "/data.blob";
+    {
+        std::ofstream out(blob_path, std::ios::binary);
+        out << "padding_data_at_start"; // 21 bytes
+        out << content; // 23 bytes (offset 21, length 23)
+    }
+
+    // 2. Prepare metadata state matching data.blob
+    pisf::MetadataState state;
+    state.next_node_id = 5;
+
+    pisf::Node root;
+    root.id = 1;
+    root.name = "/";
+    root.type = pisf::NodeType::Directory;
+    root.parent_id = std::nullopt;
+    state.nodes[1] = root;
+
+    pisf::Node dir;
+    dir.id = 2;
+    dir.name = "workspace";
+    dir.type = pisf::NodeType::Directory;
+    dir.parent_id = 1;
+    state.nodes[2] = dir;
+
+    pisf::Node file;
+    file.id = 3;
+    file.name = "doc.txt";
+    file.type = pisf::NodeType::File;
+    file.parent_id = 2;
+    file.content_offset = 21;
+    file.content_length = 23;
+    state.nodes[3] = file;
+
+    std::string err;
+    assert(pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state, err));
+
+    // 3. Construct Filesystem on this directory
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.is_initialized());
+        assert(fs.exists("/"));
+        assert(fs.exists("/workspace"));
+        assert(fs.exists("/workspace/doc.txt"));
+
+        assert(fs.ls("/") == "workspace");
+        assert(fs.ls("/workspace") == "doc.txt");
+        assert(fs.read("/workspace/doc.txt") == content);
+        assert(fs.stat("/workspace/doc.txt") == "name=doc.txt type=file id=3");
+
+        // Create new file and verify NodeId continues from restored next_node_id (5)
+        assert(fs.create("/workspace/new.txt") == "OK");
+        assert(fs.stat("/workspace/new.txt") == "name=new.txt type=file id=5");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_filesystem_missing_metadata_with_existing_blob() {
+    std::cout << "Running test_filesystem_missing_metadata_with_existing_blob... ";
+    std::string path_template = "/tmp/pisf-fs-missingmeta-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    // Create a data.blob but NO metadata.pisf
+    std::string blob_path = temp_dir + "/data.blob";
+    {
+        std::ofstream out(blob_path, std::ios::binary);
+        out << "some existing blob bytes";
+    }
+
+    pisf::Filesystem fs(temp_dir);
+    assert(!fs.is_initialized());
+    assert(fs.init_error().find("missing metadata") != std::string::npos);
+
+    // Verify metadata.pisf was NOT silently created to overwrite or ignore data.blob
+    assert(!std::filesystem::exists(temp_dir + "/metadata.pisf"));
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_filesystem_corrupted_metadata_rejected() {
+    std::cout << "Running test_filesystem_corrupted_metadata_rejected... ";
+    std::string path_template = "/tmp/pisf-fs-corruptmeta-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    std::string meta_path = temp_dir + "/metadata.pisf";
+    std::string corrupted_content = "ThisIsNotAValidPisfMetadataBinaryFileContent!";
+    {
+        std::ofstream out(meta_path, std::ios::binary);
+        out << corrupted_content;
+    }
+
+    pisf::Filesystem fs(temp_dir);
+    assert(!fs.is_initialized());
+    assert(!fs.init_error().empty());
+
+    // Verify corrupted metadata was NOT deleted or overwritten
+    std::ifstream in(meta_path, std::ios::binary);
+    std::string remaining((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    assert(remaining == corrupted_content);
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_filesystem_invalid_extent_exceeding_blob() {
+    std::cout << "Running test_filesystem_invalid_extent_exceeding_blob... ";
+    std::string path_template = "/tmp/pisf-fs-badextent-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    // Create small data.blob (10 bytes)
+    std::string blob_path = temp_dir + "/data.blob";
+    {
+        std::ofstream out(blob_path, std::ios::binary);
+        out << "0123456789";
+    }
+
+    // Metadata specifies extent [20, 30), which exceeds blob length (10)
+    pisf::MetadataState state;
+    state.next_node_id = 3;
+
+    pisf::Node root;
+    root.id = 1;
+    root.name = "/";
+    root.type = pisf::NodeType::Directory;
+    root.parent_id = std::nullopt;
+    state.nodes[1] = root;
+
+    pisf::Node file;
+    file.id = 2;
+    file.name = "bad.txt";
+    file.type = pisf::NodeType::File;
+    file.parent_id = 1;
+    file.content_offset = 20;
+    file.content_length = 10;
+    state.nodes[2] = file;
+
+    std::string err;
+    assert(pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state, err));
+
+    pisf::Filesystem fs(temp_dir);
+    assert(!fs.is_initialized());
+    assert(fs.init_error().find("exceeds blob size") != std::string::npos);
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_filesystem_fresh_dir_creates_metadata_and_root() {
+    std::cout << "Running test_filesystem_fresh_dir_creates_metadata_and_root... ";
+    std::string path_template = "/tmp/pisf-fs-fresh-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.is_initialized());
+        assert(std::filesystem::exists(temp_dir + "/metadata.pisf"));
+        assert(std::filesystem::exists(temp_dir + "/data.blob"));
+        assert(fs.stat("/") == "name=/ type=directory id=1");
+        assert(fs.total_nodes() == 1);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -565,6 +751,11 @@ int main() {
     test_concurrent_same_file_read_write();
     test_storage_backed_write_extents();
     test_storage_backed_read_reflects_blob();
+    test_filesystem_restore_from_metadata();
+    test_filesystem_missing_metadata_with_existing_blob();
+    test_filesystem_corrupted_metadata_rejected();
+    test_filesystem_invalid_extent_exceeding_blob();
+    test_filesystem_fresh_dir_creates_metadata_and_root();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

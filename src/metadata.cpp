@@ -1,13 +1,23 @@
 #include <pisf/metadata.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <climits>
 #include <cstdint>
+#include <cstring>
+#include <fcntl.h>
+#include <filesystem>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <vector>
 
 namespace pisf {
 
 namespace {
+
+static std::atomic<uint64_t> g_tmp_counter{0};
 
 inline void write_u8(std::string& buf, uint8_t val) {
     buf.push_back(static_cast<char>(val));
@@ -439,6 +449,158 @@ bool MetadataSerializer::validate(MetadataState& state, std::string& err_msg, st
                 return false;
             }
             curr = *it->second.parent_id;
+        }
+    }
+
+    return true;
+}
+
+bool MetadataSerializer::save_to_file_atomic(const std::string& data_dir, const MetadataState& state, std::string& err_msg) {
+    if (data_dir.empty()) {
+        err_msg = "Storage directory cannot be empty";
+        return false;
+    }
+
+    std::string payload;
+    if (!serialize(state, payload, err_msg)) {
+        return false;
+    }
+
+    std::filesystem::path dir_path(data_dir);
+    std::string tmp_name = "metadata.pisf.tmp." + std::to_string(getpid()) + "." +
+                           std::to_string(g_tmp_counter.fetch_add(1));
+    std::filesystem::path tmp_path = dir_path / tmp_name;
+    std::filesystem::path final_path = dir_path / "metadata.pisf";
+
+    int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        err_msg = "Failed to create temporary metadata file '" + tmp_path.string() + "': " + std::strerror(errno);
+        return false;
+    }
+
+    const char* ptr = payload.data();
+    size_t remaining = payload.size();
+    bool write_ok = true;
+
+    while (remaining > 0) {
+        ssize_t n = ::write(fd, ptr, remaining);
+        if (n > 0) {
+            ptr += n;
+            remaining -= static_cast<size_t>(n);
+        } else if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            err_msg = "write() failed on temporary metadata file: " + std::string(std::strerror(errno));
+            write_ok = false;
+            break;
+        } else {
+            err_msg = "write() returned 0 unexpectedly on temporary metadata file";
+            write_ok = false;
+            break;
+        }
+    }
+
+    if (write_ok) {
+        if (::fsync(fd) != 0) {
+            err_msg = "fsync() failed on temporary metadata file: " + std::string(std::strerror(errno));
+            write_ok = false;
+        }
+    }
+
+    if (::close(fd) != 0 && write_ok) {
+        err_msg = "close() failed on temporary metadata file: " + std::string(std::strerror(errno));
+        write_ok = false;
+    }
+
+    if (!write_ok) {
+        ::unlink(tmp_path.c_str());
+        return false;
+    }
+
+    // Atomically replace metadata.pisf
+    if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+        err_msg = "rename() failed: " + std::string(std::strerror(errno));
+        ::unlink(tmp_path.c_str());
+        return false;
+    }
+
+    // Attempt directory fsync to persist directory entry rename
+    int dir_fd = ::open(data_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd >= 0) {
+        ::fsync(dir_fd);
+        ::close(dir_fd);
+    }
+
+    return true;
+}
+
+bool MetadataSerializer::load_from_file(const std::string& data_dir, MetadataState& out_state, std::string& err_msg, std::optional<uint64_t> max_blob_size) {
+    if (data_dir.empty()) {
+        err_msg = "Storage directory cannot be empty";
+        return false;
+    }
+
+    std::filesystem::path meta_path = std::filesystem::path(data_dir) / "metadata.pisf";
+    int fd = ::open(meta_path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        err_msg = "Failed to open metadata file '" + meta_path.string() + "': " + std::strerror(errno);
+        return false;
+    }
+
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) {
+        err_msg = "fstat() failed on metadata file: " + std::string(std::strerror(errno));
+        ::close(fd);
+        return false;
+    }
+
+    if (st.st_size < 0) {
+        err_msg = "Invalid metadata file size: negative length";
+        ::close(fd);
+        return false;
+    }
+
+    size_t file_size = static_cast<size_t>(st.st_size);
+    std::string buffer;
+    buffer.resize(file_size);
+
+    char* ptr = buffer.data();
+    size_t remaining = file_size;
+    bool read_ok = true;
+
+    while (remaining > 0) {
+        ssize_t n = ::read(fd, ptr, remaining);
+        if (n > 0) {
+            ptr += n;
+            remaining -= static_cast<size_t>(n);
+        } else if (n == 0) {
+            err_msg = "Unexpected EOF reading metadata file";
+            read_ok = false;
+            break;
+        } else {
+            if (errno == EINTR) {
+                continue;
+            }
+            err_msg = "read() failed on metadata file: " + std::string(std::strerror(errno));
+            read_ok = false;
+            break;
+        }
+    }
+
+    ::close(fd);
+
+    if (!read_ok) {
+        return false;
+    }
+
+    if (!deserialize(buffer, out_state, err_msg)) {
+        return false;
+    }
+
+    if (max_blob_size.has_value()) {
+        if (!validate(out_state, err_msg, max_blob_size)) {
+            return false;
         }
     }
 

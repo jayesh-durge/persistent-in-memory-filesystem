@@ -36,6 +36,12 @@ public:
     // If max_blob_size is provided, file extents are checked against the blob size.
     static bool validate(MetadataState& state, std::string& err_msg, std::optional<uint64_t> max_blob_size = std::nullopt);
 
+    // Atomically saves metadata to metadata.pisf inside data_dir using a temp file and rename
+    static bool save_to_file_atomic(const std::string& data_dir, const MetadataState& state, std::string& err_msg);
+
+    // Loads, parses, and validates metadata from metadata.pisf inside data_dir
+    static bool load_from_file(const std::string& data_dir, MetadataState& out_state, std::string& err_msg, std::optional<uint64_t> max_blob_size = std::nullopt);
+
     // Computes standard IEEE 802.3 CRC32 checksum over buffer
     static uint32_t compute_crc32(const uint8_t* data, size_t length);
 };
