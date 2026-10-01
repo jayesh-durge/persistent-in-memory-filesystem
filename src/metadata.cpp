@@ -60,6 +60,85 @@ inline bool read_u64_le(const char*& ptr, const char* end, uint64_t& val) {
 
 } // namespace
 
+uint32_t MetadataSerializer::compute_crc32(const uint8_t* data, size_t length) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (size_t i = 0; i < length; ++i) {
+        crc ^= static_cast<uint32_t>(data[i]);
+        for (int j = 0; j < 8; ++j) {
+            if ((crc & 1u) != 0u) {
+                crc = (crc >> 1) ^ 0xEDB88320u;
+            } else {
+                crc = (crc >> 1);
+            }
+        }
+    }
+    return ~crc;
+}
+
+bool MetadataSerializer::serialize(const MetadataState& state, std::string& out_bytes, std::string& err_msg) {
+    // Validate state first to ensure we never serialize invalid metadata
+    MetadataState validated_copy = state;
+    if (!validate(validated_copy, err_msg)) {
+        return false;
+    }
+
+    out_bytes.clear();
+
+    // 1. Write Header:
+    // Magic (4 bytes): "PISF"
+    write_u32_le(out_bytes, MAGIC_HEADER);
+    // Version (4 bytes): 1
+    write_u32_le(out_bytes, CURRENT_VERSION);
+    // Flags (4 bytes): 0
+    write_u32_le(out_bytes, 0u);
+    // Node Count (8 bytes)
+    write_u64_le(out_bytes, static_cast<uint64_t>(state.nodes.size()));
+    // Next NodeId (8 bytes)
+    write_u64_le(out_bytes, state.next_node_id);
+
+    // 2. Sort nodes by NodeId for deterministic binary serialization
+    std::vector<NodeId> sorted_ids;
+    sorted_ids.reserve(state.nodes.size());
+    for (const auto& [id, _] : state.nodes) {
+        sorted_ids.push_back(id);
+    }
+    std::sort(sorted_ids.begin(), sorted_ids.end());
+
+    // 3. Serialize each node record
+    for (NodeId id : sorted_ids) {
+        const Node& node = state.nodes.at(id);
+
+        // id (8 bytes)
+        write_u64_le(out_bytes, node.id);
+
+        // parent_id (8 bytes): 0 for root
+        uint64_t pid = node.parent_id.has_value() ? *node.parent_id : 0u;
+        write_u64_le(out_bytes, pid);
+
+        // type (1 byte): 1 = Directory, 2 = File
+        uint8_t type_val = (node.type == NodeType::Directory) ? 1u : 2u;
+        write_u8(out_bytes, type_val);
+
+        // name length (4 bytes) + name bytes
+        if (node.name.size() > MAX_NAME_LENGTH) {
+            err_msg = "ERR invalid metadata: node name exceeds max allowed size";
+            return false;
+        }
+        write_u32_le(out_bytes, static_cast<uint32_t>(node.name.size()));
+        out_bytes.append(node.name);
+
+        // content offset and length (8 bytes each)
+        write_u64_le(out_bytes, node.content_offset);
+        write_u64_le(out_bytes, node.content_length);
+    }
+
+    // 4. Compute CRC32 of all bytes up to this point and append trailer
+    uint32_t crc = compute_crc32(reinterpret_cast<const uint8_t*>(out_bytes.data()), out_bytes.size());
+    write_u32_le(out_bytes, crc);
+
+    return true;
+}
+
 bool MetadataSerializer::validate(MetadataState& state, std::string& err_msg, std::optional<uint64_t> max_blob_size) {
     // 1. Root node checks
     auto root_it = state.nodes.find(ROOT_NODE_ID);
