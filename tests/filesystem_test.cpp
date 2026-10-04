@@ -829,6 +829,41 @@ void test_mutation_persistence_failure_rollback() {
     std::cout << "PASSED\n";
 }
 
+void test_mutation_persistence_dir_sync_failure_no_state_mismatch() {
+    std::cout << "Running test_mutation_persistence_dir_sync_failure_no_state_mismatch... ";
+    std::string path_template = "/tmp/pisf-fs-dirsync-test-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/file1.txt") == "OK");
+
+        // Enable simulated directory sync failure (occurs after rename has succeeded)
+        pisf::MetadataSerializer::set_simulate_dir_sync_failure(true);
+
+        std::string res = fs.create("/file2.txt");
+        assert(res.find("ERR metadata directory sync failed") != std::string::npos);
+
+        // In-memory state MUST NOT be rolled back, because metadata.pisf on disk contains file2
+        assert(fs.exists("/file2.txt"));
+        assert(fs.ls("/").find("file2.txt") != std::string::npos);
+
+        pisf::MetadataSerializer::set_simulate_dir_sync_failure(false);
+    }
+
+    // Reopen filesystem to verify on-disk state matches in-memory state (no mismatch)
+    {
+        pisf::Filesystem fs2(temp_dir);
+        assert(fs2.exists("/file1.txt"));
+        assert(fs2.exists("/file2.txt"));
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -860,6 +895,7 @@ int main() {
     test_filesystem_fresh_dir_creates_metadata_and_root();
     test_mutation_persistence();
     test_mutation_persistence_failure_rollback();
+    test_mutation_persistence_dir_sync_failure_no_state_mismatch();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

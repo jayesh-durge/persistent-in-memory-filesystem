@@ -81,6 +81,7 @@ private:
 
     // Saves current metadata state atomically to data_dir_.
     // MUST be called while holding mutex_.
+    bool save_metadata_locked(std::string& err_msg, bool& out_committed) const;
     bool save_metadata_locked(std::string& err_msg) const;
 
     // Initializes an isolated ephemeral temporary directory for unit testing

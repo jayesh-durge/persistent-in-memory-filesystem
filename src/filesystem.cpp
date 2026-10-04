@@ -165,17 +165,24 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
 }
 
 bool Filesystem::save_metadata_locked(std::string& err_msg) const {
+    bool dummy = false;
+    return save_metadata_locked(err_msg, dummy);
+}
+
+bool Filesystem::save_metadata_locked(std::string& err_msg, bool& out_committed) const {
+    out_committed = false;
     if (simulate_metadata_failure_) {
         err_msg = "simulated metadata persistence failure";
         return false;
     }
     if (data_dir_.empty() || is_ephemeral_) {
+        out_committed = true;
         return true;
     }
     MetadataState state;
     state.next_node_id = next_node_id_;
     state.nodes = nodes_;
-    return MetadataSerializer::save_to_file_atomic(data_dir_, state, err_msg);
+    return MetadataSerializer::save_to_file_atomic(data_dir_, state, err_msg, &out_committed);
 }
 
 void Filesystem::set_simulate_metadata_failure(bool simulate) {
@@ -346,11 +353,15 @@ std::string Filesystem::mkdir(const std::string& path) {
     parent_node.children[target_name] = new_id;
 
     std::string persist_err;
-    if (!save_metadata_locked(persist_err)) {
-        nodes_.erase(new_id);
-        parent_node.children.erase(target_name);
-        next_node_id_ = new_id;
-        return "ERR metadata persistence failed: " + persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            nodes_.erase(new_id);
+            parent_node.children.erase(target_name);
+            next_node_id_ = new_id;
+            return "ERR metadata persistence failed: " + persist_err;
+        }
+        return "ERR metadata directory sync failed: " + persist_err;
     }
 
     return "OK";
@@ -402,11 +413,15 @@ std::string Filesystem::create(const std::string& path) {
     parent_node.children[target_name] = new_id;
 
     std::string persist_err;
-    if (!save_metadata_locked(persist_err)) {
-        nodes_.erase(new_id);
-        parent_node.children.erase(target_name);
-        next_node_id_ = new_id;
-        return "ERR metadata persistence failed: " + persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            nodes_.erase(new_id);
+            parent_node.children.erase(target_name);
+            next_node_id_ = new_id;
+            return "ERR metadata persistence failed: " + persist_err;
+        }
+        return "ERR metadata directory sync failed: " + persist_err;
     }
 
     return "OK";
@@ -542,11 +557,15 @@ std::string Filesystem::write(const std::string& path, const std::string& conten
         node.content_length = length;
 
         std::string persist_err;
-        if (!save_metadata_locked(persist_err)) {
-            // Roll back in-memory extent to previous committed state
-            node.content_offset = old_offset;
-            node.content_length = old_length;
-            return "ERR metadata persistence failed: " + persist_err;
+        bool committed = false;
+        if (!save_metadata_locked(persist_err, committed)) {
+            if (!committed) {
+                // Roll back in-memory extent to previous committed state
+                node.content_offset = old_offset;
+                node.content_length = old_length;
+                return "ERR metadata persistence failed: " + persist_err;
+            }
+            return "ERR metadata directory sync failed: " + persist_err;
         }
     }
 

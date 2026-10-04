@@ -36,8 +36,12 @@ public:
     // If max_blob_size is provided, file extents are checked against the blob size.
     static bool validate(MetadataState& state, std::string& err_msg, std::optional<uint64_t> max_blob_size = std::nullopt);
 
-    // Atomically saves metadata to metadata.pisf inside data_dir using a temp file and rename
-    static bool save_to_file_atomic(const std::string& data_dir, const MetadataState& state, std::string& err_msg);
+    // Atomically saves metadata to metadata.pisf inside data_dir using a temp file and rename.
+    // If out_committed is non-null, it is set to true as soon as rename() succeeds.
+    static bool save_to_file_atomic(const std::string& data_dir, const MetadataState& state, std::string& err_msg, bool* out_committed = nullptr);
+
+    // Test helper to simulate directory sync failure after rename has succeeded
+    static void set_simulate_dir_sync_failure(bool simulate);
 
     // Loads, parses, and validates metadata from metadata.pisf inside data_dir
     static bool load_from_file(const std::string& data_dir, MetadataState& out_state, std::string& err_msg, std::optional<uint64_t> max_blob_size = std::nullopt);

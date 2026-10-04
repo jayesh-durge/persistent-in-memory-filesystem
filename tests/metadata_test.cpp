@@ -461,6 +461,45 @@ void test_safe_replacement_unwritable_directory() {
     std::cout << "PASSED\n";
 }
 
+void test_safe_replacement_dir_sync_failure_preserves_committed_file() {
+    std::cout << "Running test_safe_replacement_dir_sync_failure_preserves_committed_file... ";
+    std::string path_template = "/tmp/pisf-meta-dirsync-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    pisf::MetadataState state1 = create_valid_state();
+    std::string err;
+    assert(pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state1, err));
+
+    pisf::MetadataState state2 = state1;
+    pisf::Node n4;
+    n4.id = 4;
+    n4.name = "fourth.txt";
+    n4.type = pisf::NodeType::File;
+    n4.parent_id = 2;
+    state2.nodes[4] = n4;
+    state2.next_node_id = 5;
+
+    // Simulate directory sync failure after rename
+    pisf::MetadataSerializer::set_simulate_dir_sync_failure(true);
+    bool committed = false;
+    bool ok = pisf::MetadataSerializer::save_to_file_atomic(temp_dir, state2, err, &committed);
+    assert(!ok);
+    assert(committed); // Logical commit occurred
+    assert(err.find("simulated directory sync failure after rename") != std::string::npos);
+
+    // Verify on disk that metadata.pisf HAS state2 because rename succeeded
+    pisf::MetadataState loaded;
+    assert(pisf::MetadataSerializer::load_from_file(temp_dir, loaded, err));
+    assert(loaded.nodes.count(4) == 1);
+    assert(loaded.next_node_id == 5);
+
+    pisf::MetadataSerializer::set_simulate_dir_sync_failure(false);
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 } // namespace
 
 int main() {
@@ -482,6 +521,7 @@ int main() {
     test_safe_replacement_preserves_previous_file_on_failure();
     test_safe_replacement_atomic_update();
     test_safe_replacement_unwritable_directory();
+    test_safe_replacement_dir_sync_failure_preserves_committed_file();
 
     std::cout << "All metadata serialization tests passed successfully!\n";
     return 0;

@@ -18,6 +18,7 @@ namespace pisf {
 namespace {
 
 static std::atomic<uint64_t> g_tmp_counter{0};
+static std::atomic<bool> g_simulate_dir_sync_failure{false};
 
 inline void write_u8(std::string& buf, uint8_t val) {
     buf.push_back(static_cast<char>(val));
@@ -455,7 +456,15 @@ bool MetadataSerializer::validate(MetadataState& state, std::string& err_msg, st
     return true;
 }
 
-bool MetadataSerializer::save_to_file_atomic(const std::string& data_dir, const MetadataState& state, std::string& err_msg) {
+void MetadataSerializer::set_simulate_dir_sync_failure(bool simulate) {
+    g_simulate_dir_sync_failure.store(simulate, std::memory_order_relaxed);
+}
+
+bool MetadataSerializer::save_to_file_atomic(const std::string& data_dir, const MetadataState& state, std::string& err_msg, bool* out_committed) {
+    if (out_committed != nullptr) {
+        *out_committed = false;
+    }
+
     if (data_dir.empty()) {
         err_msg = "Storage directory cannot be empty";
         return false;
@@ -502,9 +511,16 @@ bool MetadataSerializer::save_to_file_atomic(const std::string& data_dir, const 
     }
 
     if (write_ok) {
-        if (::fsync(fd) != 0) {
+        while (true) {
+            if (::fsync(fd) == 0) {
+                break;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
             err_msg = "fsync() failed on temporary metadata file: " + std::string(std::strerror(errno));
             write_ok = false;
+            break;
         }
     }
 
@@ -522,6 +538,49 @@ bool MetadataSerializer::save_to_file_atomic(const std::string& data_dir, const 
     if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
         err_msg = "rename() failed: " + std::string(std::strerror(errno));
         ::unlink(tmp_path.c_str());
+        return false;
+    }
+
+    // Logical commit point reached: new metadata file pathname is now visible on disk
+    if (out_committed != nullptr) {
+        *out_committed = true;
+    }
+
+    // Check for simulated directory sync failure
+    if (g_simulate_dir_sync_failure.load(std::memory_order_relaxed)) {
+        err_msg = "simulated directory sync failure after rename (metadata committed to disk)";
+        return false;
+    }
+
+    // Open directory and fsync to ensure directory entry durability on disk
+    int dir_fd = ::open(data_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0) {
+        err_msg = "open() failed on directory '" + data_dir + "': " + std::string(std::strerror(errno)) +
+                  " (metadata committed on disk, but directory durability unconfirmed)";
+        return false;
+    }
+
+    bool dir_sync_ok = true;
+    while (true) {
+        if (::fsync(dir_fd) == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        err_msg = "fsync() failed on directory '" + data_dir + "': " + std::string(std::strerror(errno)) +
+                  " (metadata committed on disk, but directory durability unconfirmed)";
+        dir_sync_ok = false;
+        break;
+    }
+
+    if (::close(dir_fd) != 0 && dir_sync_ok) {
+        err_msg = "close() failed on directory descriptor: " + std::string(std::strerror(errno)) +
+                  " (metadata committed on disk, but directory durability unconfirmed)";
+        dir_sync_ok = false;
+    }
+
+    if (!dir_sync_ok) {
         return false;
     }
 
