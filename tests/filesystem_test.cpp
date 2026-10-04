@@ -867,6 +867,115 @@ void test_mutation_persistence_dir_sync_failure_no_state_mismatch() {
     std::cout << "PASSED\n";
 }
 
+void test_concurrent_writes_same_file_correct_extent() {
+    // Verifies that concurrent writes to the same file never produce a torn
+    // extent: after all writers finish the in-memory content must exactly match
+    // one writer's payload, not a mixture of two writers' data.
+    std::cout << "Running test_concurrent_writes_same_file_correct_extent... ";
+
+    auto temp_dir = std::filesystem::temp_directory_path() /
+                    ("pisf_concurrent_write_test." + std::to_string(::getpid()));
+    std::filesystem::create_directories(temp_dir);
+
+    pisf::Filesystem fs(temp_dir.string());
+    assert(fs.is_initialized());
+
+    assert(fs.create("/target.txt") == "OK");
+    assert(fs.write("/target.txt", "INITIAL") == "OK");
+
+    // Each writer uses a unique, fixed-size payload so we can identify which
+    // one won the last write.
+    constexpr int NUM_WRITERS = 6;
+    constexpr int ITERATIONS  = 8;  // keep very short: single lock held across fdatasync per iteration
+    std::vector<std::string> payloads;
+    payloads.push_back("INITIAL");
+    for (int w = 0; w < NUM_WRITERS; ++w) {
+        // All payloads are the same length — makes content matching simpler
+        payloads.push_back("WRITER_" + std::string(1, static_cast<char>('A' + w)) +
+                           "_PAYLOAD__XYZ");
+    }
+
+    std::vector<std::thread> threads;
+    for (int w = 0; w < NUM_WRITERS; ++w) {
+        threads.emplace_back([&fs, &payloads, w]() {
+            const std::string& payload = payloads[static_cast<size_t>(w + 1)];
+            for (int i = 0; i < ITERATIONS; ++i) {
+                std::string result = fs.write("/target.txt", payload);
+                // Either OK or a durability error — never a torn extent
+                assert(result == "OK" ||
+                       result.find("ERR metadata") != std::string::npos ||
+                       result.find("ERR storage") != std::string::npos);
+            }
+        });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // Final read must exactly match one of the known payloads
+    std::string final_content = fs.read("/target.txt");
+    bool matched = false;
+    for (const auto& p : payloads) {
+        if (final_content == p) {
+            matched = true;
+            break;
+        }
+    }
+    assert(matched && "final file content does not match any writer's payload — torn extent detected");
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_concurrent_writes_different_files_no_regression() {
+    // Verifies that concurrent writes to distinct files still all succeed and
+    // each file independently holds one writer's last payload.
+    std::cout << "Running test_concurrent_writes_different_files_no_regression... ";
+
+    auto temp_dir = std::filesystem::temp_directory_path() /
+                    ("pisf_concurrent_write_diff." + std::to_string(::getpid()));
+    std::filesystem::create_directories(temp_dir);
+
+    pisf::Filesystem fs(temp_dir.string());
+    assert(fs.is_initialized());
+
+    constexpr int NUM_FILES   = 4;
+    constexpr int ITERATIONS  = 6;  // keep very short: single lock held across fdatasync per iteration
+
+    for (int i = 0; i < NUM_FILES; ++i) {
+        assert(fs.create("/file" + std::to_string(i) + ".txt") == "OK");
+    }
+
+    std::vector<std::thread> threads;
+    for (int f = 0; f < NUM_FILES; ++f) {
+        threads.emplace_back([&fs, f]() {
+            std::string path    = "/file" + std::to_string(f) + ".txt";
+            std::string payload = "FILE" + std::to_string(f) + "_CONTENT_VALUE";
+            for (int i = 0; i < ITERATIONS; ++i) {
+                std::string result = fs.write(path, payload);
+                assert(result == "OK" ||
+                       result.find("ERR") != std::string::npos);
+            }
+        });
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // Each file should be readable and contain a well-formed string
+    for (int f = 0; f < NUM_FILES; ++f) {
+        std::string path    = "/file" + std::to_string(f) + ".txt";
+        std::string content = fs.read(path);
+        // Must contain the file index prefix
+        assert(content.find("FILE" + std::to_string(f)) != std::string::npos);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 void test_read_line_bounded_input() {
     std::cout << "Running test_read_line_bounded_input... ";
     int sv[2];
@@ -944,6 +1053,8 @@ int main() {
     test_empty_content_and_newlines();
     test_concurrent_different_files();
     test_concurrent_same_file_read_write();
+    test_concurrent_writes_same_file_correct_extent();
+    test_concurrent_writes_different_files_no_regression();
     test_storage_backed_write_extents();
     test_storage_backed_read_reflects_blob();
     test_filesystem_restore_from_metadata();

@@ -505,71 +505,60 @@ std::string Filesystem::write(const std::string& path, const std::string& conten
         return err_msg;
     }
 
-    // Pre-check path existence and type to preserve existing error behavior
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        NodeId target_id = 0;
-        if (!resolve_path_locked(components, target_id, err_msg)) {
-            return err_msg;
-        }
+    // Hold Filesystem::mutex_ for the entire write operation — path validation,
+    // blob append, extent update, and metadata persistence — so that concurrent
+    // writes to the same (or any) path cannot interleave their blob appends and
+    // metadata commits.  Reads use a snapshot pattern and are not affected.
+    //
+    // Lock ordering: Filesystem::mutex_ -> BlobStorage::mutex_ (append acquires
+    // the latter internally).  No other code acquires these in the opposite order,
+    // so there is no deadlock risk.
+    std::lock_guard<std::mutex> lock(mutex_);
 
-        auto it = nodes_.find(target_id);
-        if (it == nodes_.end()) {
-            return "ERR internal error: node missing";
-        }
-
-        if (it->second.type != NodeType::File) {
-            return "ERR not a file";
-        }
+    // 1. Validate path and node type under lock
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return err_msg;
     }
 
-    // 1. Append the new content to persistent blob storage
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end()) {
+        return "ERR internal error: node missing";
+    }
+
+    Node& node = it->second;
+    if (node.type != NodeType::File) {
+        return "ERR not a file";
+    }
+
+    uint64_t old_offset = node.content_offset;
+    uint64_t old_length = node.content_length;
+
+    // 2. Append content to persistent blob storage (lock still held)
     uint64_t offset = 0;
     uint64_t length = 0;
     if (!storage_ || !storage_->append(content, offset, length, err_msg)) {
         return "ERR storage write failed: " + err_msg;
     }
 
-    // 2. Check that the append succeeded (validated above)
+    // 3. Update the node's extent and persist metadata under the same lock
+    node.content_offset = offset;
+    node.content_length = length;
 
-    // 3. Update the node's offset and length under filesystem synchronization policy
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        NodeId target_id = 0;
-        if (!resolve_path_locked(components, target_id, err_msg)) {
-            return err_msg;
+    std::string persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            // Rename did not occur: roll back in-memory extent
+            node.content_offset = old_offset;
+            node.content_length = old_length;
+            return "ERR metadata persistence failed: " + persist_err;
         }
-
-        auto it = nodes_.find(target_id);
-        if (it == nodes_.end()) {
-            return "ERR internal error: node missing";
-        }
-
-        Node& node = it->second;
-        if (node.type != NodeType::File) {
-            return "ERR not a file";
-        }
-
-        uint64_t old_offset = node.content_offset;
-        uint64_t old_length = node.content_length;
-
-        node.content_offset = offset;
-        node.content_length = length;
-
-        std::string persist_err;
-        bool committed = false;
-        if (!save_metadata_locked(persist_err, committed)) {
-            if (!committed) {
-                // Roll back in-memory extent to previous committed state
-                node.content_offset = old_offset;
-                node.content_length = old_length;
-                return "ERR metadata persistence failed: " + persist_err;
-            }
-            return "ERR metadata directory sync failed: " + persist_err;
-        }
+        // Rename succeeded: new metadata is on disk; do NOT roll back in-memory state
+        return "ERR metadata directory sync failed: " + persist_err;
     }
 
-    // 4. Return success only after the required write has completed successfully
+    // 4. Return success only after blob content and metadata are both durable
     return "OK";
 }
 
