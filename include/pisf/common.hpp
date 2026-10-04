@@ -139,6 +139,9 @@ inline bool send_line(int fd, const std::string& message, std::string& err_msg) 
     return true;
 }
 
+// Maximum permitted command-line length in bytes (excluding newline delimiter)
+constexpr size_t MAX_COMMAND_LINE_LENGTH = 64 * 1024; // 64 KiB
+
 enum class ReadStatus {
     Success,
     PeerClosed,
@@ -147,12 +150,24 @@ enum class ReadStatus {
 };
 
 // Reads a single newline-delimited line from the socket using an internal buffer.
-// Handles partial recv() chunks, multiple lines in buffer, and EINTR.
-inline ReadStatus read_line(int fd, std::string& line_out, std::string& buffer, std::string& err_msg) {
+// Handles partial recv() chunks, multiple lines in buffer, EINTR, and enforces
+// max_line_len limit (defaulting to MAX_COMMAND_LINE_LENGTH).
+inline ReadStatus read_line(int fd, std::string& line_out, std::string& buffer, std::string& err_msg,
+                            size_t max_line_len = MAX_COMMAND_LINE_LENGTH) {
     while (true) {
         // Check if newline already present in buffer
         size_t newline_pos = buffer.find('\n');
         if (newline_pos != std::string::npos) {
+            size_t effective_len = newline_pos;
+            if (effective_len > 0 && buffer[effective_len - 1] == '\r') {
+                --effective_len;
+            }
+            if (effective_len > max_line_len) {
+                err_msg = "command line exceeds maximum allowed limit of " +
+                          std::to_string(max_line_len) + " bytes";
+                return ReadStatus::Error;
+            }
+
             line_out = buffer.substr(0, newline_pos);
             // Strip trailing carriage return if present (\r\n)
             if (!line_out.empty() && line_out.back() == '\r') {
@@ -162,16 +177,33 @@ inline ReadStatus read_line(int fd, std::string& line_out, std::string& buffer, 
             return ReadStatus::Success;
         }
 
+        // Reject input that exceeds limit even before a newline has arrived
+        if (buffer.size() > max_line_len) {
+            err_msg = "command line exceeds maximum allowed limit of " +
+                      std::to_string(max_line_len) + " bytes (no newline encountered)";
+            return ReadStatus::Error;
+        }
+
         // Receive more bytes from socket
         char chunk[256];
         ssize_t bytes_read = ::recv(fd, chunk, sizeof(chunk), 0);
 
         if (bytes_read > 0) {
             buffer.append(chunk, static_cast<size_t>(bytes_read));
-            // Loop back to check for newline
+            // Loop back to check for newline or size limit
         } else if (bytes_read == 0) {
             // Peer orderly shutdown
             if (!buffer.empty()) {
+                size_t effective_len = buffer.size();
+                if (!buffer.empty() && buffer.back() == '\r') {
+                    --effective_len;
+                }
+                if (effective_len > max_line_len) {
+                    err_msg = "command line exceeds maximum allowed limit of " +
+                              std::to_string(max_line_len) + " bytes";
+                    return ReadStatus::Error;
+                }
+
                 line_out = buffer;
                 if (!line_out.empty() && line_out.back() == '\r') {
                     line_out.pop_back();

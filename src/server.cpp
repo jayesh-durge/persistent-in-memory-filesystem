@@ -273,6 +273,8 @@ void client_worker_func(int client_fd, std::shared_ptr<std::atomic<bool>> done) 
             // Read error or socket was shut down by server during shutdown sequence
             if (!g_shutdown_requested.load(std::memory_order_relaxed)) {
                 log_msg("[Warning] Client read error (fd: " + std::to_string(client_fd) + "): " + err);
+                std::string send_err;
+                pisf::send_line(client_fd, "ERR " + err, send_err);
             }
             break;
         }

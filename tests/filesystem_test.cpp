@@ -1,5 +1,6 @@
 #include <pisf/filesystem.hpp>
 #include <pisf/metadata.hpp>
+#include <pisf/common.hpp>
 
 #include <atomic>
 #include <cassert>
@@ -7,7 +8,9 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 void test_root_initialization() {
@@ -864,6 +867,61 @@ void test_mutation_persistence_dir_sync_failure_no_state_mismatch() {
     std::cout << "PASSED\n";
 }
 
+void test_read_line_bounded_input() {
+    std::cout << "Running test_read_line_bounded_input... ";
+    int sv[2];
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+
+    std::string buffer;
+    std::string line;
+    std::string err;
+
+    // 1. Normal command
+    std::string normal = "PING\n";
+    assert(::write(sv[1], normal.data(), normal.size()) == static_cast<ssize_t>(normal.size()));
+    assert(pisf::read_line(sv[0], line, buffer, err, 100) == pisf::ReadStatus::Success);
+    assert(line == "PING");
+    assert(buffer.empty());
+
+    // 2. Command exactly at limit (limit = 10, payload = 10 bytes + \n)
+    std::string exact = "1234567890\n";
+    assert(::write(sv[1], exact.data(), exact.size()) == static_cast<ssize_t>(exact.size()));
+    assert(pisf::read_line(sv[0], line, buffer, err, 10) == pisf::ReadStatus::Success);
+    assert(line == "1234567890");
+    assert(buffer.empty());
+
+    // 3. Command exceeding limit with newline (11 bytes + \n with limit 10)
+    std::string exceeding = "12345678901\n";
+    assert(::write(sv[1], exceeding.data(), exceeding.size()) == static_cast<ssize_t>(exceeding.size()));
+    assert(pisf::read_line(sv[0], line, buffer, err, 10) == pisf::ReadStatus::Error);
+    assert(err.find("exceeds maximum allowed limit") != std::string::npos);
+    buffer.clear();
+
+    // 4. Multiple chunks exceeding limit without newline
+    std::string chunk1 = "123456";
+    std::string chunk2 = "78901";
+    assert(::write(sv[1], chunk1.data(), chunk1.size()) == static_cast<ssize_t>(chunk1.size()));
+    assert(::write(sv[1], chunk2.data(), chunk2.size()) == static_cast<ssize_t>(chunk2.size()));
+    assert(pisf::read_line(sv[0], line, buffer, err, 10) == pisf::ReadStatus::Error);
+    assert(err.find("no newline encountered") != std::string::npos);
+    buffer.clear();
+
+    // 5. Multiple commands received together
+    std::string multi = "CMD1\nCMD2\r\nCMD3\n";
+    assert(::write(sv[1], multi.data(), multi.size()) == static_cast<ssize_t>(multi.size()));
+    assert(pisf::read_line(sv[0], line, buffer, err, 50) == pisf::ReadStatus::Success);
+    assert(line == "CMD1");
+    assert(pisf::read_line(sv[0], line, buffer, err, 50) == pisf::ReadStatus::Success);
+    assert(line == "CMD2");
+    assert(pisf::read_line(sv[0], line, buffer, err, 50) == pisf::ReadStatus::Success);
+    assert(line == "CMD3");
+    assert(buffer.empty());
+
+    ::close(sv[0]);
+    ::close(sv[1]);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -896,6 +954,7 @@ int main() {
     test_mutation_persistence();
     test_mutation_persistence_failure_rollback();
     test_mutation_persistence_dir_sync_failure_no_state_mismatch();
+    test_read_line_bounded_input();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;
