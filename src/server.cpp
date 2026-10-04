@@ -428,7 +428,10 @@ int main(int argc, char* argv[]) {
     while (!g_shutdown_requested.load(std::memory_order_relaxed)) {
         prune_finished_workers(workers);
 
-        int poll_res = ::poll(pfds, 2, -1);
+        // Use a bounded timeout so prune_finished_workers() runs periodically even
+        // when no new connections arrive.  1 second is short enough to keep the
+        // worker list tidy without wasting CPU.
+        int poll_res = ::poll(pfds, 2, 1000);
         if (poll_res < 0) {
             if (errno == EINTR) {
                 // Signal received, re-evaluate loop condition
@@ -437,6 +440,8 @@ int main(int argc, char* argv[]) {
             log_msg("[Error] poll() failed: " + std::string(std::strerror(errno)));
             break;
         }
+
+        // poll_res == 0 means timeout: loop back to prune_finished_workers().
 
         // Check if wake pipe received a shutdown signal
         if (pfds[1].revents & (POLLIN | POLLERR | POLLHUP)) {
