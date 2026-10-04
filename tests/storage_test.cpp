@@ -304,6 +304,38 @@ void test_storage_restart_preserves_content_and_appends() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_sync_failure_simulation() {
+    std::cout << "Running test_storage_sync_failure_simulation... ";
+    std::string base_dir = create_test_temp_dir();
+
+    pisf::BlobStorage storage(base_dir, "data.blob");
+    std::string err;
+    assert(storage.init(err));
+
+    // Enable simulated sync failure
+    storage.set_simulate_sync_failure(true);
+
+    uint64_t off = 999;
+    uint64_t len = 999;
+    bool ok = storage.append("TestSyncFailureData", off, len, err);
+    assert(!ok);
+    assert(err.find("fdatasync() failed on blob") != std::string::npos);
+    assert(err.find("appended bytes may remain orphaned in blob") != std::string::npos);
+
+    // Disable simulated failure and verify subsequent append succeeds
+    storage.set_simulate_sync_failure(false);
+    std::string valid_data = "ValidDataAfterRecovery";
+    assert(storage.append(valid_data, off, len, err));
+    assert(len == valid_data.size());
+
+    std::string read_back;
+    assert(storage.read_range(off, len, read_back, err));
+    assert(read_back == valid_data);
+
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
 } // namespace
 
 int main() {
@@ -317,6 +349,7 @@ int main() {
     test_storage_empty_content();
     test_storage_invalid_ranges_and_errors();
     test_storage_restart_preserves_content_and_appends();
+    test_storage_sync_failure_simulation();
     std::cout << "All persistent storage unit tests passed successfully!\n";
     return 0;
 }

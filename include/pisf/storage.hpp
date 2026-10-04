@@ -40,11 +40,15 @@ public:
     const std::string& blob_path() const;
     uint64_t get_size() const;
 
+    // Test helper to simulate sync failure
+    void set_simulate_sync_failure(bool simulate);
+
 private:
     std::string data_dir_;
     std::string blob_filename_;
     std::string blob_path_;
     int fd_{-1};
+    bool simulate_sync_failure_{false};
     mutable std::mutex mutex_;
 };
 

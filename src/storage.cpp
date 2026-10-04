@@ -31,6 +31,7 @@ BlobStorage::BlobStorage(BlobStorage&& other) noexcept {
     blob_filename_ = std::move(other.blob_filename_);
     blob_path_ = std::move(other.blob_path_);
     fd_ = other.fd_;
+    simulate_sync_failure_ = other.simulate_sync_failure_;
     other.fd_ = -1;
 }
 
@@ -45,6 +46,7 @@ BlobStorage& BlobStorage::operator=(BlobStorage&& other) noexcept {
         blob_filename_ = std::move(other.blob_filename_);
         blob_path_ = std::move(other.blob_path_);
         fd_ = other.fd_;
+        simulate_sync_failure_ = other.simulate_sync_failure_;
         other.fd_ = -1;
     }
     return *this;
@@ -166,7 +168,29 @@ bool BlobStorage::append(const std::string& data, uint64_t& out_offset, uint64_t
         }
     }
 
+    if (simulate_sync_failure_) {
+        err_msg = "fdatasync() failed on blob: simulated sync failure (appended bytes may remain orphaned in blob)";
+        return false;
+    }
+
+    while (true) {
+        if (::fdatasync(fd_) == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        err_msg = "fdatasync() failed on blob: " + std::string(std::strerror(errno)) +
+                  " (appended bytes may remain orphaned in blob)";
+        return false;
+    }
+
     return true;
+}
+
+void BlobStorage::set_simulate_sync_failure(bool simulate) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    simulate_sync_failure_ = simulate;
 }
 
 bool BlobStorage::read_range(uint64_t offset, uint64_t length, std::string& out_data, std::string& err_msg) const {
