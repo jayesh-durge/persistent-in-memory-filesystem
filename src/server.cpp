@@ -213,6 +213,17 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         return pisf::send_line(client_fd, resp, err);
     }
 
+    if (verb == "RM") {
+        if (arg.empty()) {
+            std::string resp = "ERR missing path argument";
+            log_msg("[Info] Handled RM -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        std::string resp = g_fs.rm(arg);
+        log_msg("[Info] Handled RM '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
     if (verb == "READ") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";

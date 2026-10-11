@@ -1031,6 +1031,136 @@ void test_read_line_bounded_input() {
     std::cout << "PASSED\n";
 }
 
+// ============================================================
+// Milestone 7 — RM, RMDIR, MV
+// ============================================================
+
+void test_rm_basic() {
+    std::cout << "Running test_rm_basic... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/doc.txt") == "OK");
+    assert(fs.write("/doc.txt", "hello") == "OK");
+
+    // File must exist before deletion
+    assert(fs.exists("/doc.txt"));
+
+    // Delete it
+    assert(fs.rm("/doc.txt") == "OK");
+
+    // Must no longer exist
+    assert(!fs.exists("/doc.txt"));
+
+    // Read must fail
+    std::string out, err;
+    assert(!fs.read("/doc.txt", out, err));
+    assert(err.find("ERR") != std::string::npos);
+
+    // Parent directory must not contain the entry
+    std::string ls_out = fs.ls("/");
+    assert(ls_out.find("doc.txt") == std::string::npos);
+
+    std::cout << "PASSED\n";
+}
+
+void test_rm_nested() {
+    std::cout << "Running test_rm_nested... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/notes") == "OK");
+    assert(fs.create("/notes/cn.txt") == "OK");
+    assert(fs.write("/notes/cn.txt", "CompNetworks") == "OK");
+
+    assert(fs.rm("/notes/cn.txt") == "OK");
+    assert(!fs.exists("/notes/cn.txt"));
+
+    // /notes directory must still exist and be empty
+    assert(fs.exists("/notes"));
+    std::string ls_out = fs.ls("/notes");
+    assert(ls_out.empty());
+
+    std::cout << "PASSED\n";
+}
+
+void test_rm_rejects_nonexistent() {
+    std::cout << "Running test_rm_rejects_nonexistent... ";
+    pisf::Filesystem fs;
+
+    std::string resp = fs.rm("/no_such_file.txt");
+    assert(resp.find("ERR") != std::string::npos);
+    std::cout << "PASSED\n";
+}
+
+void test_rm_rejects_directory() {
+    std::cout << "Running test_rm_rejects_directory... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/mydir") == "OK");
+    std::string resp = fs.rm("/mydir");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/mydir")); // directory must still be there
+    std::cout << "PASSED\n";
+}
+
+void test_rm_rejects_root() {
+    std::cout << "Running test_rm_rejects_root... ";
+    pisf::Filesystem fs;
+
+    std::string resp = fs.rm("/");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/"));
+    std::cout << "PASSED\n";
+}
+
+void test_rm_persistence() {
+    std::cout << "Running test_rm_persistence... ";
+
+    auto temp_dir = std::filesystem::temp_directory_path() /
+                    ("pisf_rm_persist." + std::to_string(::getpid()));
+    std::filesystem::create_directories(temp_dir);
+
+    {
+        pisf::Filesystem fs(temp_dir.string());
+        assert(fs.is_initialized());
+        assert(fs.create("/data.txt") == "OK");
+        assert(fs.write("/data.txt", "ToDelete") == "OK");
+        assert(fs.rm("/data.txt") == "OK");
+        // Filesystem goes out of scope — metadata written
+    }
+
+    // Restart
+    {
+        pisf::Filesystem fs2(temp_dir.string());
+        assert(fs2.is_initialized());
+        assert(!fs2.exists("/data.txt")); // must not reappear after restart
+        assert(fs2.ls("/").empty());
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_rm_rollback_on_metadata_failure() {
+    std::cout << "Running test_rm_rollback_on_metadata_failure... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/rollback.txt") == "OK");
+    assert(fs.write("/rollback.txt", "data") == "OK");
+
+    fs.set_simulate_metadata_failure(true);
+    std::string resp = fs.rm("/rollback.txt");
+    fs.set_simulate_metadata_failure(false);
+
+    assert(resp.find("ERR") != std::string::npos);
+    // Node must still be there
+    assert(fs.exists("/rollback.txt"));
+    assert(fs.read("/rollback.txt") == "data");
+    // Parent entry must still be intact
+    assert(fs.ls("/").find("rollback.txt") != std::string::npos);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -1066,6 +1196,15 @@ int main() {
     test_mutation_persistence_failure_rollback();
     test_mutation_persistence_dir_sync_failure_no_state_mismatch();
     test_read_line_bounded_input();
+
+    // Milestone 7 — RM
+    test_rm_basic();
+    test_rm_nested();
+    test_rm_rejects_nonexistent();
+    test_rm_rejects_directory();
+    test_rm_rejects_root();
+    test_rm_persistence();
+    test_rm_rollback_on_metadata_failure();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

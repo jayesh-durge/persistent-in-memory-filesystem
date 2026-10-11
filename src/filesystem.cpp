@@ -427,6 +427,65 @@ std::string Filesystem::create(const std::string& path) {
     return "OK";
 }
 
+std::string Filesystem::rm(const std::string& path) {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+
+    if (components.empty()) {
+        return "ERR cannot remove root";
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end()) {
+        return "ERR internal error: node missing";
+    }
+
+    if (it->second.type != NodeType::File) {
+        return "ERR not a file: use RMDIR to remove directories";
+    }
+
+    // Locate and record the parent node before mutation
+    NodeId parent_id = it->second.parent_id.value();
+    auto parent_it = nodes_.find(parent_id);
+    if (parent_it == nodes_.end()) {
+        return "ERR internal error: parent node missing";
+    }
+
+    Node& parent_node = parent_it->second;
+    const std::string target_name = it->second.name;
+    Node old_node = it->second;
+
+    // Mutate in-memory: remove child entry from parent and erase the file node
+    parent_node.children.erase(target_name);
+    nodes_.erase(it);
+
+    std::string persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            // Rename did not happen — restore parent entry and re-insert node
+            nodes_[target_id] = std::move(old_node);
+            parent_node.children[target_name] = target_id;
+            return "ERR metadata persistence failed: " + persist_err;
+        }
+        // Rename succeeded — deletion is committed on disk; do NOT undo in-memory state
+        return "ERR metadata directory sync failed: " + persist_err;
+    }
+
+    // Blob extents for this file become orphaned (data.blob is append-only; no compaction)
+    return "OK";
+}
+
 std::string Filesystem::ls(const std::string& path) const {
     std::vector<std::string> components;
     std::string err_msg;
