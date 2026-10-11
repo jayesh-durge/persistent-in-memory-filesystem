@@ -25,9 +25,26 @@ SERVER_PID=""
 # Ensure cleanup on any exit
 cleanup() {
     local exit_code=$?
-    if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
         kill -TERM "${SERVER_PID}" 2>/dev/null || true
         wait "${SERVER_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${RESTART_SRV_PID:-}" ]] && kill -0 "${RESTART_SRV_PID}" 2>/dev/null; then
+        kill -TERM "${RESTART_SRV_PID}" 2>/dev/null || true
+        wait "${RESTART_SRV_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${M7_SRV_PID:-}" ]] && kill -0 "${M7_SRV_PID}" 2>/dev/null; then
+        kill -TERM "${M7_SRV_PID}" 2>/dev/null || true
+        wait "${M7_SRV_PID}" 2>/dev/null || true
+    fi
+    if [[ "${exit_code}" -ne 0 ]]; then
+        echo "Test failure log dump:"
+        for f in "${TEST_TMP_DIR}"/*.log; do
+            if [[ -f "${f}" ]]; then
+                echo "=== ${f} ==="
+                cat "${f}"
+            fi
+        done
     fi
     rm -rf "${TEST_TMP_DIR}"
     exit "${exit_code}"
@@ -36,7 +53,7 @@ trap cleanup EXIT INT TERM
 
 wait_for_server() {
     local log_file="$1"
-    for _ in {1..30}; do
+    for _ in {1..100}; do
         if grep -q "Server listening" "${log_file}" 2>/dev/null; then
             return 0
         fi
@@ -53,7 +70,7 @@ echo " Storage dir:     ${TEST_DATA_DIR}"
 echo "=========================================================="
 
 # Test 1: Client connection failure handling when server is unavailable
-echo -n "[Test 1/19] Client connection failure when server is unavailable... "
+echo -n "[Test 1/20] Client connection failure when server is unavailable... "
 if "${CLIENT_BIN}" -s "${TEST_SOCK}" >/dev/null 2>&1; then
     echo "FAILED (client should have failed when server is down)"
     exit 1
@@ -61,7 +78,7 @@ fi
 echo "PASSED"
 
 # Test 2: Server startup, Unix domain socket creation, and single PING/PONG
-echo -n "[Test 2/19] Server startup and single PING/PONG... "
+echo -n "[Test 2/20] Server startup and single PING/PONG... "
 "${SERVER_BIN}" -s "${TEST_SOCK}" -d "${TEST_DATA_DIR}" >"${TEST_TMP_DIR}/server.log" 2>&1 &
 SERVER_PID=$!
 
@@ -79,7 +96,7 @@ fi
 echo "PASSED"
 
 # Test 3: Multi-command session, unknown command handling, and QUIT
-echo -n "[Test 3/19] Multi-command session, unknown command, and QUIT... "
+echo -n "[Test 3/20] Multi-command session, unknown command, and QUIT... "
 SESSION_OUTPUT=$(printf "PING\nNON_EXISTENT_CMD\nPING\nQUIT\n" | "${CLIENT_BIN}" -s "${TEST_SOCK}")
 
 if ! echo "${SESSION_OUTPUT}" | grep -q "\[Response\] PONG"; then
@@ -97,7 +114,7 @@ fi
 echo "PASSED"
 
 # Test 4: Prevent duplicate server on active socket
-echo -n "[Test 4/19] Duplicate server refused on active socket... "
+echo -n "[Test 4/20] Duplicate server refused on active socket... "
 if "${SERVER_BIN}" -s "${TEST_SOCK}" -d "${TEST_DATA_DIR}" >/dev/null 2>&1; then
     echo "FAILED (second server should have been refused)"
     exit 1
@@ -105,7 +122,7 @@ fi
 echo "PASSED"
 
 # Test 5: Client A remains idle while Client B connects and executes PING
-echo -n "[Test 5/19] Idle Client A does not block concurrent Client B... "
+echo -n "[Test 5/20] Idle Client A does not block concurrent Client B... "
 # Client A connects and sits idle holding the connection
 python3 -c "
 import socket, time
@@ -146,7 +163,7 @@ wait "${PYTHON_CLIENT_A_PID}"
 echo "PASSED"
 
 # Test 6: Multiple concurrent clients issuing commands without response mixing
-echo -n "[Test 6/19] 5 concurrent clients issuing multiple commands... "
+echo -n "[Test 6/20] 5 concurrent clients issuing multiple commands... "
 PIDS=()
 for i in {1..5}; do
     (
@@ -170,7 +187,7 @@ done
 echo "PASSED"
 
 # Test 7: QUIT closes only requesting client session; server remains available
-echo -n "[Test 7/19] QUIT closes only requesting client... "
+echo -n "[Test 7/20] QUIT closes only requesting client... "
 QUIT_RESP=$("${CLIENT_BIN}" -s "${TEST_SOCK}" QUIT)
 if ! echo "${QUIT_RESP}" | grep -q "\[Response\] BYE"; then
     echo "FAILED (QUIT did not return BYE)"
@@ -186,7 +203,7 @@ fi
 echo "PASSED"
 
 # Test 8: Abrupt client disconnect handled cleanly
-echo -n "[Test 8/19] Abrupt client disconnect handled cleanly... "
+echo -n "[Test 8/20] Abrupt client disconnect handled cleanly... "
 python3 -c "
 import socket
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -203,7 +220,7 @@ fi
 echo "PASSED"
 
 # Test 9: Root initialization, directory/file creation, sorted listing, and STAT metadata
-echo -n "[Test 9/19] Filesystem tree creation, listing, sorting, and STAT... "
+echo -n "[Test 9/20] Filesystem tree creation, listing, sorting, and STAT... "
 ROOT_STAT=$("${CLIENT_BIN}" -s "${TEST_SOCK}" STAT /)
 if ! echo "${ROOT_STAT}" | grep -q "\[Response\] name=/ type=directory id=1"; then
     echo "FAILED (unexpected root stat: ${ROOT_STAT})"
@@ -277,7 +294,7 @@ fi
 echo "PASSED"
 
 # Test 10: Filesystem error handling (missing paths, non-directories, duplicate names)
-echo -n "[Test 10/19] Filesystem error handling (missing, non-directory, duplicates)... "
+echo -n "[Test 10/20] Filesystem error handling (missing, non-directory, duplicates)... "
 # Missing paths
 LS_MISSING=$("${CLIENT_BIN}" -s "${TEST_SOCK}" LS /missing)
 if ! echo "${LS_MISSING}" | grep -q "\[Response\] ERR not found"; then
@@ -333,7 +350,7 @@ fi
 echo "PASSED"
 
 # Test 11: Invalid path syntax, normalization, and malformed commands
-echo -n "[Test 11/19] Invalid path syntax, normalization, and malformed commands... "
+echo -n "[Test 11/20] Invalid path syntax, normalization, and malformed commands... "
 # Relative path rejection
 REL_MKDIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" MKDIR relative/path)
 if ! echo "${REL_MKDIR}" | grep -q "\[Response\] ERR invalid path"; then
@@ -393,7 +410,7 @@ fi
 echo "PASSED"
 
 # Test 12: Concurrent clients creating identical path (contested race condition)
-echo -n "[Test 12/19] Concurrent clients creating identical path (contested race)... "
+echo -n "[Test 12/20] Concurrent clients creating identical path (contested race)... "
 RACE_PIDS=()
 for i in {1..10}; do
     "${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /race_file.txt >"${TEST_TMP_DIR}/race_${i}.log" 2>&1 &
@@ -421,7 +438,7 @@ fi
 echo "PASSED"
 
 # Test 13: Concurrent independent filesystem operations without corruption
-echo -n "[Test 13/19] Concurrent independent filesystem operations... "
+echo -n "[Test 13/20] Concurrent independent filesystem operations... "
 CONC_FS_PIDS=()
 for c in {1..6}; do
     (
@@ -445,7 +462,7 @@ done
 echo "PASSED"
 
 # Test 14: File WRITE and READ operations over socket
-echo -n "[Test 14/19] File content operations (empty read, write, read, replace, spaces)... "
+echo -n "[Test 14/20] File content operations (empty read, write, read, replace, spaces)... "
 "${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /test_content.txt >/dev/null
 
 # 1. Read newly created empty file
@@ -487,7 +504,7 @@ fi
 echo "PASSED"
 
 # Test 15: File content error handling (missing, directory, missing args, newlines)
-echo -n "[Test 15/19] File content error handling (missing, directory, malformed, newlines)... "
+echo -n "[Test 15/20] File content error handling (missing, directory, malformed, newlines)... "
 # Missing file
 READ_MISSING=$("${CLIENT_BIN}" -s "${TEST_SOCK}" READ /missing_file.txt)
 if ! echo "${READ_MISSING}" | grep -q "\[Response\] ERR not found"; then
@@ -536,7 +553,7 @@ fi
 echo "PASSED"
 
 # Test 16: Concurrent clients reading and writing the same file over sockets
-echo -n "[Test 16/19] Concurrent socket clients reading and writing same file... "
+echo -n "[Test 16/20] Concurrent socket clients reading and writing same file... "
 "${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /concurrent_file.txt >/dev/null
 "${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /concurrent_file.txt "SEED_PAYLOAD" >/dev/null
 
@@ -588,7 +605,7 @@ done
 echo "PASSED"
 
 # Test 17: Graceful server shutdown via SHUTDOWN command with an idle client connected
-echo -n "[Test 17/19] SHUTDOWN unblocks idle client and cleans up... "
+echo -n "[Test 17/20] SHUTDOWN unblocks idle client and cleans up... "
 # Start an idle client that sits blocked on recv()
 python3 -c "
 import socket
@@ -630,7 +647,7 @@ fi
 echo "PASSED"
 
 # Test 18: Stale socket recovery and SIGTERM shutdown with an idle client connected
-echo -n "[Test 18/19] Stale socket recovery and SIGTERM shutdown with idle client... "
+echo -n "[Test 18/20] Stale socket recovery and SIGTERM shutdown with idle client... "
 # Create an orphaned socket file
 python3 -c "import socket; s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind('${TEST_SOCK}'); s.close()"
 if [[ ! -S "${TEST_SOCK}" ]]; then
@@ -681,7 +698,7 @@ fi
 echo "PASSED"
 
 # Test 19: Persistent blob content survives server restart (namespace is in-memory only)
-echo -n "[Test 19/19] Persistent blob survives server restart and preserves bytes... "
+echo -n "[Test 19/20] Persistent blob survives server restart and preserves bytes... "
 RESTART_DATA_DIR="${TEST_TMP_DIR}/restart_storage"
 RESTART_SOCK="${TEST_TMP_DIR}/restart.sock"
 
@@ -765,6 +782,95 @@ if ! grep -q "NewAppendedBytes67890" "${BLOB_FILE}"; then
     echo "FAILED (new content missing from data.blob)"
     exit 1
 fi
+echo "PASSED"
+
+# Test 20: Namespace mutations (RM, RMDIR, MV) over socket with server restart
+echo -n "[Test 20/20] Namespace mutations (RM, RMDIR, MV) over socket with server restart... "
+M7_DATA_DIR="${TEST_TMP_DIR}/m7_storage"
+M7_SOCK="${TEST_TMP_DIR}/m7.sock"
+
+"${SERVER_BIN}" -s "${M7_SOCK}" -d "${M7_DATA_DIR}" >"${TEST_TMP_DIR}/server_m7_1.log" 2>&1 &
+M7_SRV_PID=$!
+if ! wait_for_server "${TEST_TMP_DIR}/server_m7_1.log"; then
+    echo "FAILED (m7 server 1 failed to start)"
+    cat "${TEST_TMP_DIR}/server_m7_1.log"
+    exit 1
+fi
+
+# RM test
+"${CLIENT_BIN}" -s "${M7_SOCK}" CREATE /del_me.txt >/dev/null
+"${CLIENT_BIN}" -s "${M7_SOCK}" WRITE /del_me.txt "ToDelete" >/dev/null
+RM_RESP=$("${CLIENT_BIN}" -s "${M7_SOCK}" RM /del_me.txt)
+if ! echo "${RM_RESP}" | grep -q "\[Response\] OK"; then
+    echo "FAILED (RM failed: ${RM_RESP})"
+    exit 1
+fi
+READ_DEL_RESP=$("${CLIENT_BIN}" -s "${M7_SOCK}" READ /del_me.txt 2>&1 || true)
+if ! echo "${READ_DEL_RESP}" | grep -q "ERR not found"; then
+    echo "FAILED (file still readable after RM: ${READ_DEL_RESP})"
+    exit 1
+fi
+
+# RMDIR test
+"${CLIENT_BIN}" -s "${M7_SOCK}" MKDIR /dir_a >/dev/null
+"${CLIENT_BIN}" -s "${M7_SOCK}" CREATE /dir_a/file.txt >/dev/null
+RMDIR_NONEMPTY=$("${CLIENT_BIN}" -s "${M7_SOCK}" RMDIR /dir_a 2>&1 || true)
+if ! echo "${RMDIR_NONEMPTY}" | grep -q "ERR directory not empty"; then
+    echo "FAILED (RMDIR succeeded on non-empty directory: ${RMDIR_NONEMPTY})"
+    exit 1
+fi
+"${CLIENT_BIN}" -s "${M7_SOCK}" RM /dir_a/file.txt >/dev/null
+RMDIR_RESP=$("${CLIENT_BIN}" -s "${M7_SOCK}" RMDIR /dir_a)
+if ! echo "${RMDIR_RESP}" | grep -q "\[Response\] OK"; then
+    echo "FAILED (RMDIR failed on empty directory: ${RMDIR_RESP})"
+    exit 1
+fi
+
+# MV test
+"${CLIENT_BIN}" -s "${M7_SOCK}" CREATE /mv_src.txt >/dev/null
+"${CLIENT_BIN}" -s "${M7_SOCK}" WRITE /mv_src.txt "MovedData" >/dev/null
+"${CLIENT_BIN}" -s "${M7_SOCK}" MKDIR /mv_dst_dir >/dev/null
+MV_RESP=$("${CLIENT_BIN}" -s "${M7_SOCK}" MV /mv_src.txt /mv_dst_dir/mv_renamed.txt)
+if ! echo "${MV_RESP}" | grep -q "\[Response\] OK"; then
+    echo "FAILED (MV failed: ${MV_RESP})"
+    exit 1
+fi
+MV_READ_RESP=$("${CLIENT_BIN}" -s "${M7_SOCK}" READ /mv_dst_dir/mv_renamed.txt)
+if ! echo "${MV_READ_RESP}" | grep -q "MovedData"; then
+    echo "FAILED (MV content mismatch: ${MV_READ_RESP})"
+    exit 1
+fi
+
+# Shut down server 1
+"${CLIENT_BIN}" -s "${M7_SOCK}" SHUTDOWN >/dev/null 2>&1 || true
+wait "${M7_SRV_PID}" 2>/dev/null || true
+
+# Restart server 2 to verify persistence of RM, RMDIR, MV
+"${SERVER_BIN}" -s "${M7_SOCK}" -d "${M7_DATA_DIR}" >"${TEST_TMP_DIR}/server_m7_2.log" 2>&1 &
+M7_SRV_PID=$!
+if ! wait_for_server "${TEST_TMP_DIR}/server_m7_2.log"; then
+    echo "FAILED (m7 server 2 failed to start)"
+    cat "${TEST_TMP_DIR}/server_m7_2.log"
+    exit 1
+fi
+
+# Verify after restart: deleted file still gone
+READ_DEL_RESTART=$("${CLIENT_BIN}" -s "${M7_SOCK}" READ /del_me.txt 2>&1 || true)
+if ! echo "${READ_DEL_RESTART}" | grep -q "ERR not found"; then
+    echo "FAILED (deleted file reappeared after restart: ${READ_DEL_RESTART})"
+    exit 1
+fi
+
+# Verify after restart: moved file still at destination with correct content
+READ_MV_RESTART=$("${CLIENT_BIN}" -s "${M7_SOCK}" READ /mv_dst_dir/mv_renamed.txt)
+if ! echo "${READ_MV_RESTART}" | grep -q "MovedData"; then
+    echo "FAILED (moved file not accessible after restart: ${READ_MV_RESTART})"
+    exit 1
+fi
+
+# Clean shutdown
+"${CLIENT_BIN}" -s "${M7_SOCK}" SHUTDOWN >/dev/null 2>&1 || true
+wait "${M7_SRV_PID}" 2>/dev/null || true
 echo "PASSED"
 
 echo "=========================================================="
