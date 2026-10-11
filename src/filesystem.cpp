@@ -486,6 +486,65 @@ std::string Filesystem::rm(const std::string& path) {
     return "OK";
 }
 
+std::string Filesystem::rmdir(const std::string& path) {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+
+    if (components.empty()) {
+        return "ERR cannot remove root";
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto it = nodes_.find(target_id);
+    if (it == nodes_.end()) {
+        return "ERR internal error: node missing";
+    }
+
+    if (it->second.type != NodeType::Directory) {
+        return "ERR not a directory: use RM to remove files";
+    }
+
+    if (!it->second.children.empty()) {
+        return "ERR directory not empty";
+    }
+
+    NodeId parent_id = it->second.parent_id.value();
+    auto parent_it = nodes_.find(parent_id);
+    if (parent_it == nodes_.end()) {
+        return "ERR internal error: parent node missing";
+    }
+
+    Node& parent_node = parent_it->second;
+    const std::string target_name = it->second.name;
+    Node old_node = it->second;
+
+    // Mutate in-memory
+    parent_node.children.erase(target_name);
+    nodes_.erase(it);
+
+    std::string persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            nodes_[target_id] = std::move(old_node);
+            parent_node.children[target_name] = target_id;
+            return "ERR metadata persistence failed: " + persist_err;
+        }
+        return "ERR metadata directory sync failed: " + persist_err;
+    }
+
+    return "OK";
+}
+
 std::string Filesystem::ls(const std::string& path) const {
     std::vector<std::string> components;
     std::string err_msg;

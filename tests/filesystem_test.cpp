@@ -1161,6 +1161,118 @@ void test_rm_rollback_on_metadata_failure() {
     std::cout << "PASSED\n";
 }
 
+void test_rmdir_basic() {
+    std::cout << "Running test_rmdir_basic... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/emptydir") == "OK");
+    assert(fs.exists("/emptydir"));
+
+    assert(fs.rmdir("/emptydir") == "OK");
+    assert(!fs.exists("/emptydir"));
+    assert(fs.ls("/").find("emptydir") == std::string::npos);
+
+    std::cout << "PASSED\n";
+}
+
+void test_rmdir_nested_empty() {
+    std::cout << "Running test_rmdir_nested_empty... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/a") == "OK");
+    assert(fs.mkdir("/a/b") == "OK");
+    assert(fs.rmdir("/a/b") == "OK");
+    assert(!fs.exists("/a/b"));
+    assert(fs.exists("/a"));
+    std::cout << "PASSED\n";
+}
+
+void test_rmdir_rejects_nonempty() {
+    std::cout << "Running test_rmdir_rejects_nonempty... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/full") == "OK");
+    assert(fs.create("/full/file.txt") == "OK");
+
+    std::string resp = fs.rmdir("/full");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/full"));
+    assert(fs.exists("/full/file.txt"));
+    std::cout << "PASSED\n";
+}
+
+void test_rmdir_rejects_file() {
+    std::cout << "Running test_rmdir_rejects_file... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/afile.txt") == "OK");
+    std::string resp = fs.rmdir("/afile.txt");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/afile.txt"));
+    std::cout << "PASSED\n";
+}
+
+void test_rmdir_rejects_nonexistent() {
+    std::cout << "Running test_rmdir_rejects_nonexistent... ";
+    pisf::Filesystem fs;
+
+    std::string resp = fs.rmdir("/no_such_dir");
+    assert(resp.find("ERR") != std::string::npos);
+    std::cout << "PASSED\n";
+}
+
+void test_rmdir_rejects_root() {
+    std::cout << "Running test_rmdir_rejects_root... ";
+    pisf::Filesystem fs;
+
+    std::string resp = fs.rmdir("/");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/"));
+    std::cout << "PASSED\n";
+}
+
+void test_rmdir_persistence() {
+    std::cout << "Running test_rmdir_persistence... ";
+
+    auto temp_dir = std::filesystem::temp_directory_path() /
+                    ("pisf_rmdir_persist." + std::to_string(::getpid()));
+    std::filesystem::create_directories(temp_dir);
+
+    {
+        pisf::Filesystem fs(temp_dir.string());
+        assert(fs.is_initialized());
+        assert(fs.mkdir("/tmpdir") == "OK");
+        assert(fs.rmdir("/tmpdir") == "OK");
+    }
+
+    {
+        pisf::Filesystem fs2(temp_dir.string());
+        assert(fs2.is_initialized());
+        assert(!fs2.exists("/tmpdir"));
+        assert(fs2.ls("/").empty());
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_rmdir_rollback_on_metadata_failure() {
+    std::cout << "Running test_rmdir_rollback_on_metadata_failure... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/rollbackdir") == "OK");
+
+    fs.set_simulate_metadata_failure(true);
+    std::string resp = fs.rmdir("/rollbackdir");
+    fs.set_simulate_metadata_failure(false);
+
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/rollbackdir")); // must still exist
+    assert(fs.ls("/").find("rollbackdir") != std::string::npos);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -1205,6 +1317,16 @@ int main() {
     test_rm_rejects_root();
     test_rm_persistence();
     test_rm_rollback_on_metadata_failure();
+
+    // Milestone 7 — RMDIR
+    test_rmdir_basic();
+    test_rmdir_nested_empty();
+    test_rmdir_rejects_nonempty();
+    test_rmdir_rejects_file();
+    test_rmdir_rejects_nonexistent();
+    test_rmdir_rejects_root();
+    test_rmdir_persistence();
+    test_rmdir_rollback_on_metadata_failure();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;
