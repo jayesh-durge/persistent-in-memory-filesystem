@@ -55,6 +55,7 @@ public:
     std::string create(const std::string& path);
     std::string rm(const std::string& path);
     std::string rmdir(const std::string& path);
+    std::string mv(const std::string& src_path, const std::string& dst_path);
     std::string ls(const std::string& path) const;
     std::string stat(const std::string& path) const;
     std::string write(const std::string& path, const std::string& content);

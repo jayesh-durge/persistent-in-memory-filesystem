@@ -1273,6 +1273,272 @@ void test_rmdir_rollback_on_metadata_failure() {
     std::cout << "PASSED\n";
 }
 
+void test_mv_rename_file_same_dir() {
+    std::cout << "Running test_mv_rename_file_same_dir... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/old.txt") == "OK");
+    assert(fs.write("/old.txt", "ContentABC") == "OK");
+
+    uint64_t orig_offset = 0, orig_length = 0;
+    assert(fs.get_node_extent("/old.txt", orig_offset, orig_length));
+
+    assert(fs.mv("/old.txt", "/new.txt") == "OK");
+
+    // old name gone, new name present
+    assert(!fs.exists("/old.txt"));
+    assert(fs.exists("/new.txt"));
+    assert(fs.ls("/").find("old.txt") == std::string::npos);
+    assert(fs.ls("/").find("new.txt") != std::string::npos);
+
+    // Content preserved
+    assert(fs.read("/new.txt") == "ContentABC");
+
+    // NodeId (extent) preserved
+    uint64_t new_offset = 0, new_length = 0;
+    assert(fs.get_node_extent("/new.txt", new_offset, new_length));
+    assert(new_offset == orig_offset);
+    assert(new_length == orig_length);
+
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rename_directory_same_dir() {
+    std::cout << "Running test_mv_rename_directory_same_dir... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/old_dir") == "OK");
+    assert(fs.create("/old_dir/file.txt") == "OK");
+    assert(fs.write("/old_dir/file.txt", "InDir") == "OK");
+
+    assert(fs.mv("/old_dir", "/new_dir") == "OK");
+
+    assert(!fs.exists("/old_dir"));
+    assert(fs.exists("/new_dir"));
+    assert(fs.exists("/new_dir/file.txt"));
+    assert(fs.read("/new_dir/file.txt") == "InDir");
+
+    std::cout << "PASSED\n";
+}
+
+void test_mv_move_file_between_dirs() {
+    std::cout << "Running test_mv_move_file_between_dirs... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/src_dir") == "OK");
+    assert(fs.mkdir("/dst_dir") == "OK");
+    assert(fs.create("/src_dir/file.txt") == "OK");
+    assert(fs.write("/src_dir/file.txt", "MovedContent") == "OK");
+
+    assert(fs.mv("/src_dir/file.txt", "/dst_dir/file.txt") == "OK");
+
+    assert(!fs.exists("/src_dir/file.txt"));
+    assert(fs.exists("/dst_dir/file.txt"));
+    assert(fs.read("/dst_dir/file.txt") == "MovedContent");
+    assert(fs.ls("/src_dir").empty());
+
+    std::cout << "PASSED\n";
+}
+
+void test_mv_move_directory_between_dirs() {
+    std::cout << "Running test_mv_move_directory_between_dirs... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/parent_a") == "OK");
+    assert(fs.mkdir("/parent_b") == "OK");
+    assert(fs.mkdir("/parent_a/subdir") == "OK");
+    assert(fs.create("/parent_a/subdir/child.txt") == "OK");
+    assert(fs.write("/parent_a/subdir/child.txt", "ChildData") == "OK");
+
+    assert(fs.mv("/parent_a/subdir", "/parent_b/subdir") == "OK");
+
+    assert(!fs.exists("/parent_a/subdir"));
+    assert(fs.exists("/parent_b/subdir"));
+    assert(fs.exists("/parent_b/subdir/child.txt"));
+    assert(fs.read("/parent_b/subdir/child.txt") == "ChildData");
+    assert(fs.ls("/parent_a").empty());
+
+    std::cout << "PASSED\n";
+}
+
+void test_mv_preserves_descendants_and_nodeids() {
+    std::cout << "Running test_mv_preserves_descendants_and_nodeids... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/root_dir") == "OK");
+    assert(fs.create("/root_dir/f1.txt") == "OK");
+    assert(fs.write("/root_dir/f1.txt", "F1Content") == "OK");
+    assert(fs.mkdir("/root_dir/sub") == "OK");
+    assert(fs.create("/root_dir/sub/f2.txt") == "OK");
+    assert(fs.write("/root_dir/sub/f2.txt", "F2Content") == "OK");
+
+    uint64_t f1_off = 0, f1_len = 0, f2_off = 0, f2_len = 0;
+    assert(fs.get_node_extent("/root_dir/f1.txt", f1_off, f1_len));
+    assert(fs.get_node_extent("/root_dir/sub/f2.txt", f2_off, f2_len));
+
+    assert(fs.mv("/root_dir", "/moved_dir") == "OK");
+
+    // All descendants accessible
+    assert(fs.exists("/moved_dir"));
+    assert(fs.exists("/moved_dir/f1.txt"));
+    assert(fs.exists("/moved_dir/sub"));
+    assert(fs.exists("/moved_dir/sub/f2.txt"));
+
+    // Content preserved
+    assert(fs.read("/moved_dir/f1.txt") == "F1Content");
+    assert(fs.read("/moved_dir/sub/f2.txt") == "F2Content");
+
+    // Extents (NodeId proxies) unchanged
+    uint64_t new_f1_off = 0, new_f1_len = 0, new_f2_off = 0, new_f2_len = 0;
+    assert(fs.get_node_extent("/moved_dir/f1.txt", new_f1_off, new_f1_len));
+    assert(fs.get_node_extent("/moved_dir/sub/f2.txt", new_f2_off, new_f2_len));
+    assert(new_f1_off == f1_off && new_f1_len == f1_len);
+    assert(new_f2_off == f2_off && new_f2_len == f2_len);
+
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rejects_nonexistent_src() {
+    std::cout << "Running test_mv_rejects_nonexistent_src... ";
+    pisf::Filesystem fs;
+
+    std::string resp = fs.mv("/no_such.txt", "/dst.txt");
+    assert(resp.find("ERR") != std::string::npos);
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rejects_nonexistent_dst_parent() {
+    std::cout << "Running test_mv_rejects_nonexistent_dst_parent... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/src.txt") == "OK");
+    std::string resp = fs.mv("/src.txt", "/no_parent/dst.txt");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/src.txt")); // unchanged
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rejects_existing_dst_name() {
+    std::cout << "Running test_mv_rejects_existing_dst_name... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/a.txt") == "OK");
+    assert(fs.create("/b.txt") == "OK");
+
+    std::string resp = fs.mv("/a.txt", "/b.txt");
+    assert(resp.find("ERR") != std::string::npos);
+    // Both files must still exist
+    assert(fs.exists("/a.txt"));
+    assert(fs.exists("/b.txt"));
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rejects_moving_root() {
+    std::cout << "Running test_mv_rejects_moving_root... ";
+    pisf::Filesystem fs;
+
+    std::string resp = fs.mv("/", "/newroot");
+    assert(resp.find("ERR") != std::string::npos);
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rejects_move_into_self() {
+    std::cout << "Running test_mv_rejects_move_into_self... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/mydir") == "OK");
+    std::string resp = fs.mv("/mydir", "/mydir/mydir");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/mydir")); // unchanged
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rejects_move_into_descendant() {
+    std::cout << "Running test_mv_rejects_move_into_descendant... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/a") == "OK");
+    assert(fs.mkdir("/a/b") == "OK");
+    assert(fs.mkdir("/a/b/c") == "OK");
+
+    // Attempt to move /a into /a/b/c — c is a descendant of a
+    std::string resp = fs.mv("/a", "/a/b/c/a");
+    assert(resp.find("ERR") != std::string::npos);
+    assert(fs.exists("/a"));
+    assert(fs.exists("/a/b"));
+    assert(fs.exists("/a/b/c"));
+    std::cout << "PASSED\n";
+}
+
+void test_mv_same_name_noop() {
+    std::cout << "Running test_mv_same_name_noop... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/same.txt") == "OK");
+    assert(fs.write("/same.txt", "SameContent") == "OK");
+
+    // Moving to the exact same path is a no-op
+    assert(fs.mv("/same.txt", "/same.txt") == "OK");
+    assert(fs.exists("/same.txt"));
+    assert(fs.read("/same.txt") == "SameContent");
+    std::cout << "PASSED\n";
+}
+
+void test_mv_persistence() {
+    std::cout << "Running test_mv_persistence... ";
+
+    auto temp_dir = std::filesystem::temp_directory_path() /
+                    ("pisf_mv_persist." + std::to_string(::getpid()));
+    std::filesystem::create_directories(temp_dir);
+
+    {
+        pisf::Filesystem fs(temp_dir.string());
+        assert(fs.is_initialized());
+        assert(fs.mkdir("/docs") == "OK");
+        assert(fs.create("/docs/report.txt") == "OK");
+        assert(fs.write("/docs/report.txt", "PersistMV") == "OK");
+        assert(fs.mkdir("/archive") == "OK");
+
+        assert(fs.mv("/docs/report.txt", "/archive/report.txt") == "OK");
+    }
+
+    {
+        pisf::Filesystem fs2(temp_dir.string());
+        assert(fs2.is_initialized());
+        assert(!fs2.exists("/docs/report.txt"));
+        assert(fs2.exists("/archive/report.txt"));
+        assert(fs2.read("/archive/report.txt") == "PersistMV");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_mv_rollback_on_metadata_failure() {
+    std::cout << "Running test_mv_rollback_on_metadata_failure... ";
+    pisf::Filesystem fs;
+
+    assert(fs.create("/orig.txt") == "OK");
+    assert(fs.write("/orig.txt", "RollbackData") == "OK");
+
+    fs.set_simulate_metadata_failure(true);
+    std::string resp = fs.mv("/orig.txt", "/renamed.txt");
+    fs.set_simulate_metadata_failure(false);
+
+    assert(resp.find("ERR") != std::string::npos);
+    // Source must still exist under old name
+    assert(fs.exists("/orig.txt"));
+    assert(fs.read("/orig.txt") == "RollbackData");
+    // Destination must not have been created
+    assert(!fs.exists("/renamed.txt"));
+    // Root listing must show only original name
+    std::string ls_out = fs.ls("/");
+    assert(ls_out.find("orig.txt") != std::string::npos);
+    assert(ls_out.find("renamed.txt") == std::string::npos);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -1327,6 +1593,22 @@ int main() {
     test_rmdir_rejects_root();
     test_rmdir_persistence();
     test_rmdir_rollback_on_metadata_failure();
+
+    // Milestone 7 — MV
+    test_mv_rename_file_same_dir();
+    test_mv_rename_directory_same_dir();
+    test_mv_move_file_between_dirs();
+    test_mv_move_directory_between_dirs();
+    test_mv_preserves_descendants_and_nodeids();
+    test_mv_rejects_nonexistent_src();
+    test_mv_rejects_nonexistent_dst_parent();
+    test_mv_rejects_existing_dst_name();
+    test_mv_rejects_moving_root();
+    test_mv_rejects_move_into_self();
+    test_mv_rejects_move_into_descendant();
+    test_mv_same_name_noop();
+    test_mv_persistence();
+    test_mv_rollback_on_metadata_failure();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

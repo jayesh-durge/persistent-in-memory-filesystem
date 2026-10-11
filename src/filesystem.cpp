@@ -545,6 +545,124 @@ std::string Filesystem::rmdir(const std::string& path) {
     return "OK";
 }
 
+std::string Filesystem::mv(const std::string& src_path, const std::string& dst_path) {
+    // dst_path is the full destination: parent directory + new name.
+    // e.g.  MV /docs/old.txt /docs/new.txt   → rename within same dir
+    //       MV /docs/old.txt /archive/old.txt → move to /archive, keep name
+
+    std::vector<std::string> src_components;
+    std::vector<std::string> dst_components;
+    std::string err_msg;
+
+    if (!parse_path(src_path, src_components, err_msg)) {
+        return err_msg;
+    }
+    if (!parse_path(dst_path, dst_components, err_msg)) {
+        return err_msg;
+    }
+
+    if (src_components.empty()) {
+        return "ERR cannot move root";
+    }
+    if (dst_components.empty()) {
+        return "ERR invalid destination: cannot replace root";
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // --- Resolve source ---
+    NodeId src_id = 0;
+    if (!resolve_path_locked(src_components, src_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto src_it = nodes_.find(src_id);
+    if (src_it == nodes_.end()) {
+        return "ERR internal error: source node missing";
+    }
+    Node& src_node = src_it->second;
+
+    NodeId old_parent_id = src_node.parent_id.value();
+    const std::string old_name = src_node.name;
+
+    // --- Resolve destination parent (all components except the last = new name) ---
+    std::string new_name = dst_components.back();
+    std::vector<std::string> dst_parent_components(dst_components.begin(),
+                                                    dst_components.end() - 1);
+    NodeId new_parent_id = 0;
+    if (!resolve_path_locked(dst_parent_components, new_parent_id, err_msg)) {
+        return err_msg;
+    }
+
+    auto new_parent_it = nodes_.find(new_parent_id);
+    if (new_parent_it == nodes_.end()) {
+        return "ERR internal error: destination parent node missing";
+    }
+    Node& new_parent_node = new_parent_it->second;
+    if (new_parent_node.type != NodeType::Directory) {
+        return "ERR destination parent is not a directory";
+    }
+
+    // --- Handle the no-op case: same parent and same name ---
+    if (new_parent_id == old_parent_id && new_name == old_name) {
+        return "OK"; // nothing to do
+    }
+
+    // --- Validate no name collision at destination ---
+    if (new_parent_node.children.count(new_name) > 0) {
+        return "ERR already exists: '" + new_name + "' already exists in destination directory";
+    }
+
+    // --- Guard against moving a directory into itself or a descendant ---
+    if (src_node.type == NodeType::Directory) {
+        // Walk up from new_parent_id; if we encounter src_id, it's a descendant
+        NodeId check_id = new_parent_id;
+        while (true) {
+            if (check_id == src_id) {
+                return "ERR invalid move: cannot move a directory into itself or a descendant";
+            }
+            auto check_it = nodes_.find(check_id);
+            if (check_it == nodes_.end() || !check_it->second.parent_id.has_value()) {
+                break; // reached root
+            }
+            check_id = check_it->second.parent_id.value();
+        }
+    }
+
+    // --- Apply in-memory mutations ---
+    auto old_parent_it = nodes_.find(old_parent_id);
+    if (old_parent_it == nodes_.end()) {
+        return "ERR internal error: source parent node missing";
+    }
+    Node& old_parent_node = old_parent_it->second;
+
+    // 1. Remove from old parent
+    old_parent_node.children.erase(old_name);
+    // 2. Add to new parent
+    new_parent_node.children[new_name] = src_id;
+    // 3. Update node itself
+    src_node.name      = new_name;
+    src_node.parent_id = new_parent_id;
+
+    // --- Persist ---
+    std::string persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            // Full rollback
+            src_node.name      = old_name;
+            src_node.parent_id = old_parent_id;
+            new_parent_node.children.erase(new_name);
+            old_parent_node.children[old_name] = src_id;
+            return "ERR metadata persistence failed: " + persist_err;
+        }
+        // Rename succeeded — do NOT undo
+        return "ERR metadata directory sync failed: " + persist_err;
+    }
+
+    return "OK";
+}
+
 std::string Filesystem::ls(const std::string& path) const {
     std::vector<std::string> components;
     std::string err_msg;

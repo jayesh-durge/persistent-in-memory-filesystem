@@ -235,6 +235,44 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         return pisf::send_line(client_fd, resp, err);
     }
 
+    if (verb == "MV") {
+        // Syntax: MV <src_path> <dst_path>
+        // src_path and dst_path are separated by whitespace after the verb
+        if (space_pos == std::string::npos) {
+            std::string resp = "ERR missing arguments: MV requires source and destination paths";
+            log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+
+        // Parse two space-separated path arguments
+        size_t src_start = request.find_first_not_of(" \t", space_pos);
+        if (src_start == std::string::npos) {
+            std::string resp = "ERR missing arguments: MV requires source and destination paths";
+            log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        size_t src_end = request.find_first_of(" \t", src_start);
+        if (src_end == std::string::npos) {
+            std::string resp = "ERR missing destination path";
+            log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        std::string src_arg = request.substr(src_start, src_end - src_start);
+
+        size_t dst_start = request.find_first_not_of(" \t", src_end);
+        if (dst_start == std::string::npos) {
+            std::string resp = "ERR missing destination path";
+            log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+        size_t dst_end = request.find_last_not_of(" \t\r\n");
+        std::string dst_arg = request.substr(dst_start, dst_end - dst_start + 1);
+
+        std::string resp = g_fs.mv(src_arg, dst_arg);
+        log_msg("[Info] Handled MV '" + src_arg + "' -> '" + dst_arg + "' result=" + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
     if (verb == "READ") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";
