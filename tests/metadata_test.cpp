@@ -147,9 +147,9 @@ void test_invalid_magic_and_version() {
     assert(!pisf::MetadataSerializer::deserialize(bad_magic, restored, err));
     assert(err.find("magic") != std::string::npos);
 
-    // Unsupported version (e.g. version 2)
+    // Unsupported version (e.g. version 99 or version 0)
     std::string bad_ver = bytes;
-    bad_ver[4] = 2; // version is at offset 4
+    bad_ver[4] = 99; // version is at offset 4
     new_crc = pisf::MetadataSerializer::compute_crc32(
         reinterpret_cast<const uint8_t*>(bad_ver.data()), bad_ver.size() - 4);
     bad_ver[bad_ver.size() - 4] = static_cast<char>(new_crc & 0xFFu);
@@ -159,6 +159,53 @@ void test_invalid_magic_and_version() {
 
     assert(!pisf::MetadataSerializer::deserialize(bad_ver, restored, err));
     assert(err.find("unsupported metadata version") != std::string::npos);
+
+    std::cout << "PASSED\n";
+}
+
+void test_v1_compatibility_and_v2_generation() {
+    std::cout << "Running test_v1_compatibility_and_v2_generation... ";
+    std::string err;
+
+    // 1. Serialize a valid state (which serializes as V2)
+    pisf::MetadataState orig = create_valid_state();
+    std::string v2_bytes;
+    assert(pisf::MetadataSerializer::serialize(orig, v2_bytes, err));
+
+    // Convert V2 serialized payload into valid V1 format:
+    // In V2: header is 36 bytes (bytes 28..35 is blob_generation uint64_t).
+    // In V1: header is 28 bytes without blob_generation.
+    std::string v1_bytes = v2_bytes.substr(0, 28) + v2_bytes.substr(36, v2_bytes.size() - 36 - 4);
+    // Set version to 1 (uint32_t at offset 4)
+    v1_bytes[4] = 1;
+    v1_bytes[5] = 0;
+    v1_bytes[6] = 0;
+    v1_bytes[7] = 0;
+
+    // Recompute and append CRC32
+    uint32_t v1_crc = pisf::MetadataSerializer::compute_crc32(
+        reinterpret_cast<const uint8_t*>(v1_bytes.data()), v1_bytes.size());
+    v1_bytes.push_back(static_cast<char>(v1_crc & 0xFFu));
+    v1_bytes.push_back(static_cast<char>((v1_crc >> 8) & 0xFFu));
+    v1_bytes.push_back(static_cast<char>((v1_crc >> 16) & 0xFFu));
+    v1_bytes.push_back(static_cast<char>((v1_crc >> 24) & 0xFFu));
+
+    // Deserialize V1 payload
+    pisf::MetadataState v1_state;
+    assert(pisf::MetadataSerializer::deserialize(v1_bytes, v1_state, err));
+    assert(v1_state.blob_generation == 0); // V1 must default to generation 0
+    assert(v1_state.nodes.size() == orig.nodes.size());
+
+    // 2. Test V2 serialization round-trip with non-zero blob_generation
+    orig.blob_generation = 42;
+    std::string v2_gen42_bytes;
+    assert(pisf::MetadataSerializer::serialize(orig, v2_gen42_bytes, err));
+
+    pisf::MetadataState v2_restored;
+    assert(pisf::MetadataSerializer::deserialize(v2_gen42_bytes, v2_restored, err));
+    assert(v2_restored.blob_generation == 42);
+    assert(v2_restored.next_node_id == orig.next_node_id);
+    assert(v2_restored.nodes.size() == orig.nodes.size());
 
     std::cout << "PASSED\n";
 }
@@ -509,6 +556,7 @@ int main() {
     test_corrupted_checksum();
     test_truncated_data();
     test_invalid_magic_and_version();
+    test_v1_compatibility_and_v2_generation();
     test_missing_root_and_invalid_root();
     test_duplicate_child_names();
     test_missing_and_file_parents();

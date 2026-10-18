@@ -14,6 +14,7 @@ namespace pisf {
 // In-memory representation of the persistent filesystem metadata state
 struct MetadataState {
     NodeId next_node_id{ROOT_NODE_ID + 1};
+    uint64_t blob_generation{0};
     std::unordered_map<NodeId, Node> nodes;
 };
 
@@ -22,7 +23,7 @@ struct MetadataState {
 class MetadataSerializer {
 public:
     static constexpr uint32_t MAGIC_HEADER = 0x50495346; // ASCII "PISF" (0x50, 0x49, 0x53, 0x46)
-    static constexpr uint32_t CURRENT_VERSION = 1;
+    static constexpr uint32_t CURRENT_VERSION = 2;
     static constexpr size_t MAX_NAME_LENGTH = 4096;
     static constexpr uint64_t MAX_NODE_COUNT = 1000000;
 

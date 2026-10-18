@@ -12,6 +12,7 @@ class BlobStorage {
 public:
     BlobStorage();
     explicit BlobStorage(std::string data_dir, std::string blob_filename = "data.blob");
+    BlobStorage(std::string data_dir, uint64_t generation);
     ~BlobStorage();
 
     // Movable but non-copyable to ensure single ownership of file descriptor
@@ -19,6 +20,9 @@ public:
     BlobStorage& operator=(const BlobStorage&) = delete;
     BlobStorage(BlobStorage&& other) noexcept;
     BlobStorage& operator=(BlobStorage&& other) noexcept;
+
+    // Helper to format standard generation-based blob filename
+    static std::string format_blob_filename(uint64_t generation);
 
     // Initializes storage: ensures storage directory exists and opens/creates blob file.
     // Returns true on success; sets err_msg and returns false on error.
@@ -38,7 +42,9 @@ public:
     bool is_open() const;
     const std::string& data_dir() const;
     const std::string& blob_path() const;
+    const std::string& blob_filename() const;
     uint64_t get_size() const;
+    uint64_t generation() const;
 
     // Test helper to simulate sync failure
     void set_simulate_sync_failure(bool simulate);
@@ -47,6 +53,7 @@ private:
     std::string data_dir_;
     std::string blob_filename_;
     std::string blob_path_;
+    uint64_t generation_{0};
     int fd_{-1};
     bool simulate_sync_failure_{false};
     mutable std::mutex mutex_;

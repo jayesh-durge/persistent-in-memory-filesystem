@@ -67,6 +67,7 @@ public:
     size_t total_nodes() const;
     bool get_node_extent(const std::string& path, uint64_t& out_offset, uint64_t& out_length) const;
     const BlobStorage* storage() const;
+    uint64_t blob_generation() const;
     const std::string& data_dir() const;
     bool is_initialized() const;
     const std::string& init_error() const;
@@ -92,8 +93,9 @@ private:
 
     mutable std::mutex mutex_;
     NodeId next_node_id_{ROOT_NODE_ID + 1};
+    uint64_t blob_generation_{0};
     std::unordered_map<NodeId, Node> nodes_;
-    std::unique_ptr<BlobStorage> storage_;
+    std::shared_ptr<BlobStorage> storage_;
     std::string data_dir_;
     std::string ephemeral_dir_;
     bool is_ephemeral_{false};

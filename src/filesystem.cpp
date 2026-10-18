@@ -74,10 +74,7 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
     }
 
     std::string meta_path = (std::filesystem::path(data_dir) / "metadata.pisf").string();
-    std::string blob_path = (std::filesystem::path(data_dir) / "data.blob").string();
-
     bool meta_exists = std::filesystem::is_regular_file(meta_path, ec);
-    bool blob_exists = std::filesystem::is_regular_file(blob_path, ec);
 
     if (meta_exists) {
         MetadataState state;
@@ -87,7 +84,17 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
             return false;
         }
 
-        auto new_storage = std::make_unique<BlobStorage>(data_dir);
+        std::string blob_filename = BlobStorage::format_blob_filename(state.blob_generation);
+        std::string active_blob_path = (std::filesystem::path(data_dir) / blob_filename).string();
+        if (!std::filesystem::is_regular_file(active_blob_path, ec)) {
+            err_msg = "ERR missing blob for active generation: '" + blob_filename +
+                      "' is missing in '" + data_dir + "'";
+            is_initialized_ = false;
+            init_error_ = err_msg;
+            return false;
+        }
+
+        auto new_storage = std::make_shared<BlobStorage>(data_dir, state.blob_generation);
         if (!new_storage->init(err_msg)) {
             is_initialized_ = false;
             init_error_ = err_msg;
@@ -104,6 +111,7 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
         data_dir_ = data_dir;
         nodes_ = std::move(state.nodes);
         next_node_id_ = state.next_node_id;
+        blob_generation_ = state.blob_generation;
         storage_ = std::move(new_storage);
         is_initialized_ = true;
         init_error_.clear();
@@ -111,8 +119,18 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
     }
 
     // Metadata file does not exist
-    if (blob_exists) {
-        err_msg = "ERR missing metadata: 'data.blob' exists in '" + data_dir +
+    bool any_blob_exists = false;
+    for (const auto& entry : std::filesystem::directory_iterator(data_dir, ec)) {
+        std::string fname = entry.path().filename().string();
+        if (fname == "data.blob" ||
+            (fname.rfind("data-", 0) == 0 && fname.size() > 5 && fname.substr(fname.size() - 5) == ".blob")) {
+            any_blob_exists = true;
+            break;
+        }
+    }
+
+    if (any_blob_exists) {
+        err_msg = "ERR missing metadata: blob storage file exists in '" + data_dir +
                   "' but 'metadata.pisf' is missing; refusing to initialize empty filesystem";
         is_initialized_ = false;
         init_error_ = err_msg;
@@ -139,8 +157,9 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
     root.parent_id = std::nullopt;
     nodes_[ROOT_NODE_ID] = std::move(root);
     next_node_id_ = ROOT_NODE_ID + 1;
+    blob_generation_ = 0;
 
-    auto new_storage = std::make_unique<BlobStorage>(data_dir);
+    auto new_storage = std::make_shared<BlobStorage>(data_dir, 0);
     if (!new_storage->init(err_msg)) {
         is_initialized_ = false;
         init_error_ = err_msg;
@@ -152,6 +171,7 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
 
     MetadataState initial_state;
     initial_state.next_node_id = next_node_id_;
+    initial_state.blob_generation = blob_generation_;
     initial_state.nodes = nodes_;
     if (!MetadataSerializer::save_to_file_atomic(data_dir_, initial_state, err_msg)) {
         is_initialized_ = false;
@@ -181,8 +201,14 @@ bool Filesystem::save_metadata_locked(std::string& err_msg, bool& out_committed)
     }
     MetadataState state;
     state.next_node_id = next_node_id_;
+    state.blob_generation = blob_generation_;
     state.nodes = nodes_;
     return MetadataSerializer::save_to_file_atomic(data_dir_, state, err_msg, &out_committed);
+}
+
+uint64_t Filesystem::blob_generation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return blob_generation_;
 }
 
 void Filesystem::set_simulate_metadata_failure(bool simulate) {
@@ -806,8 +832,10 @@ bool Filesystem::read(const std::string& path, std::string& out_content, std::st
 
     uint64_t offset = 0;
     uint64_t length = 0;
+    std::shared_ptr<BlobStorage> active_storage;
 
     // 1. Hold filesystem mutex while obtaining a consistent snapshot of content location
+    //    and a shared reference to the active storage generation.
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -830,6 +858,7 @@ bool Filesystem::read(const std::string& path, std::string& out_content, std::st
 
         offset = node.content_offset;
         length = node.content_length;
+        active_storage = storage_;
     }
 
     // 2. Handle empty file consistently without disk I/O
@@ -838,8 +867,8 @@ bool Filesystem::read(const std::string& path, std::string& out_content, std::st
         return true;
     }
 
-    // 3. Read content from persistent blob storage
-    if (!storage_ || !storage_->read_range(offset, length, out_content, err_msg)) {
+    // 3. Read content from persistent blob storage using the snapshotted storage handle
+    if (!active_storage || !active_storage->read_range(offset, length, out_content, err_msg)) {
         return false;
     }
 

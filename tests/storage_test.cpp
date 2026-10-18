@@ -336,6 +336,62 @@ void test_storage_sync_failure_simulation() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_generation_naming_and_accessors() {
+    std::cout << "Running test_storage_generation_naming_and_accessors... ";
+    assert(pisf::BlobStorage::format_blob_filename(0) == "data.blob");
+    assert(pisf::BlobStorage::format_blob_filename(1) == "data-1.blob");
+    assert(pisf::BlobStorage::format_blob_filename(42) == "data-42.blob");
+
+    std::string base_dir = create_test_temp_dir();
+    pisf::BlobStorage gen0(base_dir, static_cast<uint64_t>(0));
+    assert(gen0.generation() == 0);
+    assert(gen0.blob_filename() == "data.blob");
+
+    pisf::BlobStorage gen5(base_dir, 5);
+    assert(gen5.generation() == 5);
+    assert(gen5.blob_filename() == "data-5.blob");
+
+    std::string err;
+    assert(gen5.init(err));
+    assert(std::filesystem::exists(base_dir + "/data-5.blob"));
+
+    uint64_t off = 0, len = 0;
+    assert(gen5.append("generation5data", off, len, err));
+    std::string read_back;
+    assert(gen5.read_range(off, len, read_back, err));
+    assert(read_back == "generation5data");
+
+    gen5.close();
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
+void test_storage_shared_ptr_reader_safety_on_unlink() {
+    std::cout << "Running test_storage_shared_ptr_reader_safety_on_unlink... ";
+    std::string base_dir = create_test_temp_dir();
+
+    auto storage = std::make_shared<pisf::BlobStorage>(base_dir, 1);
+    std::string err;
+    assert(storage->init(err));
+
+    uint64_t off = 0, len = 0;
+    assert(storage->append("live-data-before-unlink", off, len, err));
+
+    // Simulate compaction unlinking the old generation file
+    std::error_code ec;
+    assert(std::filesystem::remove(storage->blob_path(), ec));
+    assert(!std::filesystem::exists(storage->blob_path()));
+
+    // In-flight read through shared_ptr holding open fd must still succeed!
+    std::string read_back;
+    assert(storage->read_range(off, len, read_back, err));
+    assert(read_back == "live-data-before-unlink");
+
+    storage->close();
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
 } // namespace
 
 int main() {
@@ -350,6 +406,8 @@ int main() {
     test_storage_invalid_ranges_and_errors();
     test_storage_restart_preserves_content_and_appends();
     test_storage_sync_failure_simulation();
+    test_storage_generation_naming_and_accessors();
+    test_storage_shared_ptr_reader_safety_on_unlink();
     std::cout << "All persistent storage unit tests passed successfully!\n";
     return 0;
 }

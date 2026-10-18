@@ -106,6 +106,8 @@ bool MetadataSerializer::serialize(const MetadataState& state, std::string& out_
     write_u64_le(out_bytes, static_cast<uint64_t>(state.nodes.size()));
     // Next NodeId (8 bytes)
     write_u64_le(out_bytes, state.next_node_id);
+    // Active Blob Generation (8 bytes in Version 2)
+    write_u64_le(out_bytes, state.blob_generation);
 
     // 2. Sort nodes by NodeId for deterministic binary serialization
     std::vector<NodeId> sorted_ids;
@@ -192,7 +194,7 @@ bool MetadataSerializer::deserialize(const std::string& bytes, MetadataState& ou
         err_msg = "ERR invalid metadata: failed to read format version";
         return false;
     }
-    if (version != CURRENT_VERSION) {
+    if (version != 1 && version != CURRENT_VERSION) {
         err_msg = "ERR unsupported metadata version: " + std::to_string(version);
         return false;
     }
@@ -219,8 +221,17 @@ bool MetadataSerializer::deserialize(const std::string& bytes, MetadataState& ou
         return false;
     }
 
+    uint64_t blob_generation = 0;
+    if (version >= 2) {
+        if (!read_u64_le(ptr, end, blob_generation)) {
+            err_msg = "ERR invalid metadata: failed to read blob generation";
+            return false;
+        }
+    }
+
     MetadataState state;
     state.next_node_id = next_node_id;
+    state.blob_generation = blob_generation;
 
     // 3. Parse Node records
     for (uint64_t i = 0; i < node_count; ++i) {

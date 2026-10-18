@@ -15,10 +15,35 @@ BlobStorage::BlobStorage()
     : BlobStorage(get_default_storage_dir(), "data.blob") {
 }
 
+std::string BlobStorage::format_blob_filename(uint64_t generation) {
+    if (generation == 0) {
+        return "data.blob";
+    }
+    return "data-" + std::to_string(generation) + ".blob";
+}
+
 BlobStorage::BlobStorage(std::string data_dir, std::string blob_filename)
     : data_dir_(std::move(data_dir)),
       blob_filename_(std::move(blob_filename)),
-      blob_path_((std::filesystem::path(data_dir_) / blob_filename_).string()) {
+      blob_path_((std::filesystem::path(data_dir_) / blob_filename_).string()),
+      generation_(0) {
+    // Attempt to infer generation if filename matches data-<N>.blob
+    if (blob_filename_.rfind("data-", 0) == 0 && blob_filename_.size() > 10 &&
+        blob_filename_.substr(blob_filename_.size() - 5) == ".blob") {
+        try {
+            std::string num_str = blob_filename_.substr(5, blob_filename_.size() - 10);
+            generation_ = std::stoull(num_str);
+        } catch (...) {
+            generation_ = 0;
+        }
+    }
+}
+
+BlobStorage::BlobStorage(std::string data_dir, uint64_t generation)
+    : data_dir_(std::move(data_dir)),
+      blob_filename_(format_blob_filename(generation)),
+      blob_path_((std::filesystem::path(data_dir_) / blob_filename_).string()),
+      generation_(generation) {
 }
 
 BlobStorage::~BlobStorage() {
@@ -30,6 +55,7 @@ BlobStorage::BlobStorage(BlobStorage&& other) noexcept {
     data_dir_ = std::move(other.data_dir_);
     blob_filename_ = std::move(other.blob_filename_);
     blob_path_ = std::move(other.blob_path_);
+    generation_ = other.generation_;
     fd_ = other.fd_;
     simulate_sync_failure_ = other.simulate_sync_failure_;
     other.fd_ = -1;
@@ -45,6 +71,7 @@ BlobStorage& BlobStorage::operator=(BlobStorage&& other) noexcept {
         data_dir_ = std::move(other.data_dir_);
         blob_filename_ = std::move(other.blob_filename_);
         blob_path_ = std::move(other.blob_path_);
+        generation_ = other.generation_;
         fd_ = other.fd_;
         simulate_sync_failure_ = other.simulate_sync_failure_;
         other.fd_ = -1;
@@ -108,6 +135,10 @@ const std::string& BlobStorage::blob_path() const {
     return blob_path_;
 }
 
+const std::string& BlobStorage::blob_filename() const {
+    return blob_filename_;
+}
+
 uint64_t BlobStorage::get_size() const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ < 0) {
@@ -118,6 +149,11 @@ uint64_t BlobStorage::get_size() const {
         return 0;
     }
     return static_cast<uint64_t>(st.st_size);
+}
+
+uint64_t BlobStorage::generation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generation_;
 }
 
 bool BlobStorage::append(const std::string& data, uint64_t& out_offset, uint64_t& out_length, std::string& err_msg) {
