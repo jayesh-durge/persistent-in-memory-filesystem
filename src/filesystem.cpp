@@ -115,6 +115,7 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
         storage_ = std::move(new_storage);
         is_initialized_ = true;
         init_error_.clear();
+        cleanup_obsolete_blobs_locked(blob_generation_);
         return true;
     }
 
@@ -899,6 +900,147 @@ bool Filesystem::exists(const std::string& path) const {
 size_t Filesystem::total_nodes() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return nodes_.size();
+}
+
+void Filesystem::cleanup_obsolete_blobs_locked(uint64_t active_gen) {
+    if (data_dir_.empty()) {
+        return;
+    }
+
+    std::error_code ec;
+    std::string active_name = BlobStorage::format_blob_filename(active_gen);
+    for (const auto& entry : std::filesystem::directory_iterator(data_dir_, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+
+        std::string fname = entry.path().filename().string();
+        if (fname == active_name) continue;
+
+        if (fname == "data.blob") {
+            if (active_gen != 0) {
+                std::filesystem::remove(entry.path(), ec);
+            }
+        } else if (fname.rfind("data-", 0) == 0 && fname.size() > 10 &&
+                   fname.substr(fname.size() - 5) == ".blob") {
+            try {
+                uint64_t g = std::stoull(fname.substr(5, fname.size() - 10));
+                if (g != active_gen) {
+                    std::filesystem::remove(entry.path(), ec);
+                }
+            } catch (...) {
+                // Ignore parsing errors for other files
+            }
+        }
+    }
+}
+
+bool Filesystem::compact(std::string& err_msg) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!is_initialized_) {
+        err_msg = "Filesystem is not initialized";
+        return false;
+    }
+
+    uint64_t old_gen = blob_generation_;
+    uint64_t new_gen = old_gen + 1;
+
+    // Remove any leftover blob with new_gen from an earlier aborted attempt
+    std::string new_blob_filename = BlobStorage::format_blob_filename(new_gen);
+    std::string new_blob_path = (std::filesystem::path(data_dir_) / new_blob_filename).string();
+    std::error_code ec;
+    if (std::filesystem::exists(new_blob_path, ec)) {
+        std::filesystem::remove(new_blob_path, ec);
+    }
+
+    auto new_storage = std::make_shared<BlobStorage>(data_dir_, new_gen);
+    if (!new_storage->init(err_msg)) {
+        return false;
+    }
+
+    struct PlannedExtent {
+        NodeId id;
+        uint64_t old_offset;
+        uint64_t new_offset;
+        uint64_t length;
+    };
+    std::vector<PlannedExtent> planned;
+
+    // Collect all live regular files with non-empty content
+    std::vector<NodeId> live_file_ids;
+    for (const auto& [id, node] : nodes_) {
+        if (node.type == NodeType::File && node.content_length > 0) {
+            live_file_ids.push_back(id);
+        }
+    }
+    // Sort by old content_offset for sequential read pattern
+    std::sort(live_file_ids.begin(), live_file_ids.end(), [this](NodeId a, NodeId b) {
+        return nodes_.at(a).content_offset < nodes_.at(b).content_offset;
+    });
+
+    for (NodeId id : live_file_ids) {
+        const Node& node = nodes_.at(id);
+        std::string chunk;
+        if (!storage_ || !storage_->read_range(node.content_offset, node.content_length, chunk, err_msg)) {
+            new_storage->close();
+            std::filesystem::remove(new_blob_path, ec);
+            err_msg = "Compaction read failed for node " + std::to_string(id) + ": " + err_msg;
+            return false;
+        }
+
+        uint64_t new_offset = 0;
+        uint64_t new_length = 0;
+        if (!new_storage->append(chunk, new_offset, new_length, err_msg)) {
+            new_storage->close();
+            std::filesystem::remove(new_blob_path, ec);
+            err_msg = "Compaction append failed for node " + std::to_string(id) + ": " + err_msg;
+            return false;
+        }
+
+        planned.push_back({id, node.content_offset, new_offset, new_length});
+    }
+
+    // Prepare updated MetadataState
+    MetadataState new_state;
+    new_state.next_node_id = next_node_id_;
+    new_state.blob_generation = new_gen;
+    new_state.nodes = nodes_;
+    for (const auto& p : planned) {
+        new_state.nodes[p.id].content_offset = p.new_offset;
+        new_state.nodes[p.id].content_length = p.length;
+    }
+
+    if (simulate_metadata_failure_) {
+        new_storage->close();
+        std::filesystem::remove(new_blob_path, ec);
+        err_msg = "simulated metadata persistence failure during compaction";
+        return false;
+    }
+
+    bool committed = false;
+    if (!MetadataSerializer::save_to_file_atomic(data_dir_, new_state, err_msg, &committed)) {
+        if (!committed) {
+            new_storage->close();
+            std::filesystem::remove(new_blob_path, ec);
+            err_msg = "Compaction metadata persistence failed: " + err_msg;
+            return false;
+        }
+        // If committed == true, rename succeeded but dir sync failed.
+        // Recovery would load new_state, so we adopt new_state in memory.
+    }
+
+    // Apply updates to in-memory metadata
+    for (const auto& p : planned) {
+        nodes_[p.id].content_offset = p.new_offset;
+        nodes_[p.id].content_length = p.length;
+    }
+    blob_generation_ = new_gen;
+    auto old_storage = storage_;
+    storage_ = new_storage;
+
+    // Safely delete obsolete generation(s)
+    cleanup_obsolete_blobs_locked(new_gen);
+
+    return true;
 }
 
 } // namespace pisf

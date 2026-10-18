@@ -1539,6 +1539,338 @@ void test_mv_rollback_on_metadata_failure() {
     std::cout << "PASSED\n";
 }
 
+void test_compaction_basic() {
+    std::cout << "Running test_compaction_basic... ";
+    std::string path_template = "/tmp/pisf-fs-compact-basic-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/fileA.txt") == "OK");
+        assert(fs.write("/fileA.txt", "AAA_original") == "OK");
+        assert(fs.create("/fileB.txt") == "OK");
+        assert(fs.write("/fileB.txt", "BBB_live") == "OK");
+        assert(fs.create("/fileC.txt") == "OK");
+        assert(fs.write("/fileC.txt", "CCC_live") == "OK");
+
+        // Overwrite fileA with new content (making old content dead)
+        assert(fs.write("/fileA.txt", "AAA_overwritten") == "OK");
+
+        // Delete fileC (making its content dead)
+        assert(fs.rm("/fileC.txt") == "OK");
+
+        assert(fs.blob_generation() == 0);
+        std::string gen0_path = temp_dir + "/data.blob";
+        assert(std::filesystem::exists(gen0_path));
+
+        // Trigger compaction
+        std::string err;
+        assert(fs.compact(err));
+        assert(err.empty());
+
+        // Generation must now be 1
+        assert(fs.blob_generation() == 1);
+        std::string gen1_path = temp_dir + "/data-1.blob";
+        assert(std::filesystem::exists(gen1_path));
+        // Old blob must be reclaimed
+        assert(!std::filesystem::exists(gen0_path));
+
+        // Verify live contents remain exact
+        assert(fs.read("/fileA.txt") == "AAA_overwritten");
+        assert(fs.read("/fileB.txt") == "BBB_live");
+        assert(!fs.exists("/fileC.txt"));
+
+        // Verify the size of gen1 blob is exactly the sum of live extents
+        // "AAA_overwritten" is 15 bytes, "BBB_live" is 8 bytes = 23 bytes
+        assert(std::filesystem::file_size(gen1_path) == 23);
+    }
+
+    // Reopen filesystem to verify crash recovery / persistence of compacted state
+    {
+        pisf::Filesystem fs2(temp_dir);
+        assert(fs2.blob_generation() == 1);
+        assert(fs2.read("/fileA.txt") == "AAA_overwritten");
+        assert(fs2.read("/fileB.txt") == "BBB_live");
+        assert(!fs2.exists("/fileC.txt"));
+
+        // Verify writing to compacted generation works
+        assert(fs2.write("/fileA.txt", "AAA_gen1_write") == "OK");
+        assert(fs2.read("/fileA.txt") == "AAA_gen1_write");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_compaction_multiple_generations() {
+    std::cout << "Running test_compaction_multiple_generations... ";
+    std::string path_template = "/tmp/pisf-fs-compact-multigen-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/data.txt") == "OK");
+        assert(fs.write("/data.txt", "gen0_content") == "OK");
+
+        std::string err;
+        // First compaction: gen 0 -> gen 1
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 1);
+        assert(std::filesystem::exists(temp_dir + "/data-1.blob"));
+        assert(!std::filesystem::exists(temp_dir + "/data.blob"));
+        assert(fs.read("/data.txt") == "gen0_content");
+
+        // Second compaction: gen 1 -> gen 2
+        assert(fs.write("/data.txt", "gen1_content") == "OK");
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 2);
+        assert(std::filesystem::exists(temp_dir + "/data-2.blob"));
+        assert(!std::filesystem::exists(temp_dir + "/data-1.blob"));
+        assert(fs.read("/data.txt") == "gen1_content");
+    }
+
+    // Reopen to verify generation 2 is loaded
+    {
+        pisf::Filesystem fs2(temp_dir);
+        assert(fs2.blob_generation() == 2);
+        assert(fs2.read("/data.txt") == "gen1_content");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_compaction_rollback_on_metadata_failure() {
+    std::cout << "Running test_compaction_rollback_on_metadata_failure... ";
+    std::string path_template = "/tmp/pisf-fs-compact-fail-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/stable.txt") == "OK");
+        assert(fs.write("/stable.txt", "ImportantData") == "OK");
+        assert(fs.blob_generation() == 0);
+
+        // Simulate metadata persistence failure during compaction
+        fs.set_simulate_metadata_failure(true);
+        std::string err;
+        bool ok = fs.compact(err);
+        assert(!ok);
+        assert(err.find("simulated metadata persistence failure") != std::string::npos);
+
+        // Active generation must remain 0
+        assert(fs.blob_generation() == 0);
+        assert(std::filesystem::exists(temp_dir + "/data.blob"));
+        // Uncommitted gen 1 blob must have been removed
+        assert(!std::filesystem::exists(temp_dir + "/data-1.blob"));
+        // Live data must remain readable
+        assert(fs.read("/stable.txt") == "ImportantData");
+
+        // Disable failure and compact successfully
+        fs.set_simulate_metadata_failure(false);
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 1);
+        assert(fs.read("/stable.txt") == "ImportantData");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_compaction_crash_during_blob_copy() {
+    std::cout << "Running test_compaction_crash_during_blob_copy... ";
+    std::string path_template = "/tmp/pisf-crash-copy-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/file1.txt") == "OK");
+        assert(fs.write("/file1.txt", "OriginalContent1") == "OK");
+        assert(fs.create("/file2.txt") == "OK");
+        assert(fs.write("/file2.txt", "OriginalContent2") == "OK");
+        assert(fs.blob_generation() == 0);
+    }
+
+    // Simulate crash during copy: partial data-1.blob exists on disk, but metadata still points to gen 0
+    std::string partial_blob = temp_dir + "/data-1.blob";
+    {
+        std::ofstream out(partial_blob, std::ios::binary);
+        out << "corrupted-or-partial-data";
+    }
+    assert(std::filesystem::exists(partial_blob));
+
+    // Recovery must load gen 0 authoritatively and clean up orphaned data-1.blob
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.blob_generation() == 0);
+        assert(fs.read("/file1.txt") == "OriginalContent1");
+        assert(fs.read("/file2.txt") == "OriginalContent2");
+        assert(!std::filesystem::exists(partial_blob));
+
+        // Subsequent compaction must now succeed cleanly
+        std::string err;
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 1);
+        assert(fs.read("/file1.txt") == "OriginalContent1");
+        assert(fs.read("/file2.txt") == "OriginalContent2");
+        assert(std::filesystem::exists(temp_dir + "/data-1.blob"));
+        assert(!std::filesystem::exists(temp_dir + "/data.blob"));
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_compaction_crash_after_new_blob_synced_before_metadata_commit() {
+    std::cout << "Running test_compaction_crash_after_new_blob_synced_before_metadata_commit... ";
+    std::string path_template = "/tmp/pisf-crash-before-meta-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/doc.txt") == "OK");
+        assert(fs.write("/doc.txt", "AuthoritativeGen0") == "OK");
+    }
+
+    // Create a complete data-1.blob, but metadata.pisf on disk still points to gen 0
+    std::string gen1_blob = temp_dir + "/data-1.blob";
+    {
+        std::ofstream out(gen1_blob, std::ios::binary);
+        out << "NewBlobDataNotReferencedByMetadata";
+    }
+
+    // Start filesystem: must select generation 0 and safely discard orphaned data-1.blob
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.blob_generation() == 0);
+        assert(fs.read("/doc.txt") == "AuthoritativeGen0");
+        assert(!std::filesystem::exists(gen1_blob));
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_compaction_crash_during_old_generation_cleanup() {
+    std::cout << "Running test_compaction_crash_during_old_generation_cleanup... ";
+    std::string path_template = "/tmp/pisf-crash-cleanup-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/keep.txt") == "OK");
+        assert(fs.write("/keep.txt", "Gen1Data") == "OK");
+        std::string err;
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 1);
+    }
+
+    // Simulate crash during cleanup of previous generation:
+    // Re-create obsolete data.blob
+    {
+        std::ofstream out(temp_dir + "/data.blob", std::ios::binary);
+        out << "obsolete-leftover-data";
+    }
+
+    // Reopen filesystem: must select gen 1, verify active blob is kept, and obsolete data.blob is removed
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.blob_generation() == 1);
+        assert(fs.read("/keep.txt") == "Gen1Data");
+        assert(std::filesystem::exists(temp_dir + "/data-1.blob"));
+        assert(!std::filesystem::exists(temp_dir + "/data.blob"));
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_compaction_legacy_generation_0_recovery() {
+    std::cout << "Running test_compaction_legacy_generation_0_recovery... ";
+    std::string path_template = "/tmp/pisf-legacy-gen0-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    // Create a legacy gen-0 installation using V1 metadata header
+    {
+        std::string blob_path = temp_dir + "/data.blob";
+        std::string content = "LegacyBlobContent";
+        {
+            std::ofstream out(blob_path, std::ios::binary);
+            out << content;
+        }
+
+        // Craft V1 metadata pointing to content in data.blob
+        pisf::MetadataState v1_state;
+        v1_state.next_node_id = 3;
+        v1_state.blob_generation = 0;
+
+        pisf::Node root;
+        root.id = 1;
+        root.name = "/";
+        root.type = pisf::NodeType::Directory;
+        root.children["legacy.txt"] = 2;
+        v1_state.nodes[1] = root;
+
+        pisf::Node file_node;
+        file_node.id = 2;
+        file_node.name = "legacy.txt";
+        file_node.type = pisf::NodeType::File;
+        file_node.parent_id = 1;
+        file_node.content_offset = 0;
+        file_node.content_length = content.size();
+        v1_state.nodes[2] = file_node;
+
+        std::string v2_bytes;
+        std::string err;
+        assert(pisf::MetadataSerializer::serialize(v1_state, v2_bytes, err));
+        // Strip 8-byte generation from header to create real V1 binary
+        std::string v1_bytes = v2_bytes.substr(0, 28) + v2_bytes.substr(36, v2_bytes.size() - 36 - 4);
+        v1_bytes[4] = 1; v1_bytes[5] = 0; v1_bytes[6] = 0; v1_bytes[7] = 0;
+        uint32_t crc = pisf::MetadataSerializer::compute_crc32(
+            reinterpret_cast<const uint8_t*>(v1_bytes.data()), v1_bytes.size());
+        v1_bytes.push_back(static_cast<char>(crc & 0xFFu));
+        v1_bytes.push_back(static_cast<char>((crc >> 8) & 0xFFu));
+        v1_bytes.push_back(static_cast<char>((crc >> 16) & 0xFFu));
+        v1_bytes.push_back(static_cast<char>((crc >> 24) & 0xFFu));
+
+        std::ofstream meta_out(temp_dir + "/metadata.pisf", std::ios::binary);
+        meta_out.write(v1_bytes.data(), v1_bytes.size());
+    }
+
+    // Load with Filesystem: must recognize legacy installation as gen 0 and read content
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.blob_generation() == 0);
+        assert(fs.exists("/legacy.txt"));
+        assert(fs.read("/legacy.txt") == "LegacyBlobContent");
+
+        // Now compact it
+        std::string err;
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 1);
+        assert(fs.read("/legacy.txt") == "LegacyBlobContent");
+        assert(std::filesystem::exists(temp_dir + "/data-1.blob"));
+        assert(!std::filesystem::exists(temp_dir + "/data.blob"));
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -1609,6 +1941,15 @@ int main() {
     test_mv_same_name_noop();
     test_mv_persistence();
     test_mv_rollback_on_metadata_failure();
+
+    // Milestone 8 — Compaction
+    test_compaction_basic();
+    test_compaction_multiple_generations();
+    test_compaction_rollback_on_metadata_failure();
+    test_compaction_crash_during_blob_copy();
+    test_compaction_crash_after_new_blob_synced_before_metadata_commit();
+    test_compaction_crash_during_old_generation_cleanup();
+    test_compaction_legacy_generation_0_recovery();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;

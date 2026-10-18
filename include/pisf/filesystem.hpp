@@ -62,6 +62,11 @@ public:
     std::string read(const std::string& path) const;
     bool read(const std::string& path, std::string& out_content, std::string& err_msg) const;
 
+    // Compaction & Space Reclamation:
+    // Identifies live file extents, copies them into generation N+1,
+    // updates metadata atomically, and reclaims obsolete blob generations.
+    bool compact(std::string& err_msg);
+
     // Direct metadata inspection helper (thread-safe, useful for unit tests)
     bool exists(const std::string& path) const;
     size_t total_nodes() const;
@@ -87,6 +92,10 @@ private:
     // MUST be called while holding mutex_.
     bool save_metadata_locked(std::string& err_msg, bool& out_committed) const;
     bool save_metadata_locked(std::string& err_msg) const;
+
+    // Removes obsolete generation blob files, preserving active_gen.
+    // MUST be called while holding mutex_.
+    void cleanup_obsolete_blobs_locked(uint64_t active_gen);
 
     // Initializes an isolated ephemeral temporary directory for unit testing
     void init_ephemeral();
