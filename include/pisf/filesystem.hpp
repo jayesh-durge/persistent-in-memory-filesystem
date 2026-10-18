@@ -41,6 +41,14 @@ struct Node {
     uint64_t content_length{0};
 };
 
+struct StorageStats {
+    uint64_t total_blob_bytes{0};
+    uint64_t live_bytes{0};
+    uint64_t reclaimable_bytes{0};
+    uint64_t active_generation{0};
+    size_t live_files{0};
+};
+
 class Filesystem {
 public:
     Filesystem();
@@ -66,6 +74,9 @@ public:
     // Identifies live file extents, copies them into generation N+1,
     // updates metadata atomically, and reclaims obsolete blob generations.
     bool compact(std::string& err_msg);
+
+    // Queries current storage consumption and reclamation statistics
+    StorageStats get_storage_stats() const;
 
     // Direct metadata inspection helper (thread-safe, useful for unit tests)
     bool exists(const std::string& path) const;

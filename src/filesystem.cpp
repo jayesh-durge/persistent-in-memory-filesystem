@@ -1043,4 +1043,37 @@ bool Filesystem::compact(std::string& err_msg) {
     return true;
 }
 
+StorageStats Filesystem::get_storage_stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    StorageStats stats;
+    stats.active_generation = blob_generation_;
+
+    if (storage_) {
+        stats.total_blob_bytes = storage_->get_size();
+    }
+
+    uint64_t live_bytes = 0;
+    size_t live_files = 0;
+    for (const auto& [id, node] : nodes_) {
+        if (node.type == NodeType::File) {
+            ++live_files;
+            if (UINT64_MAX - live_bytes < node.content_length) {
+                live_bytes = UINT64_MAX;
+            } else {
+                live_bytes += node.content_length;
+            }
+        }
+    }
+
+    stats.live_files = live_files;
+    stats.live_bytes = live_bytes;
+    if (stats.total_blob_bytes >= live_bytes) {
+        stats.reclaimable_bytes = stats.total_blob_bytes - live_bytes;
+    } else {
+        stats.reclaimable_bytes = 0;
+    }
+
+    return stats;
+}
+
 } // namespace pisf

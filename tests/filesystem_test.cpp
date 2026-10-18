@@ -1871,6 +1871,86 @@ void test_compaction_legacy_generation_0_recovery() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_stats_and_space_reclamation() {
+    std::cout << "Running test_storage_stats_and_space_reclamation... ";
+    std::string path_template = "/tmp/pisf-stats-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+
+        // Initial empty state
+        pisf::StorageStats s0 = fs.get_storage_stats();
+        assert(s0.active_generation == 0);
+        assert(s0.total_blob_bytes == 0);
+        assert(s0.live_bytes == 0);
+        assert(s0.reclaimable_bytes == 0);
+        assert(s0.live_files == 0);
+
+        // 1. Write a file
+        assert(fs.create("/fileA.txt") == "OK");
+        assert(fs.write("/fileA.txt", "InitialContentA") == "OK"); // 15 bytes
+        pisf::StorageStats s1 = fs.get_storage_stats();
+        assert(s1.total_blob_bytes == 15);
+        assert(s1.live_bytes == 15);
+        assert(s1.reclaimable_bytes == 0);
+        assert(s1.live_files == 1);
+
+        // 2. Overwrite fileA several times
+        assert(fs.write("/fileA.txt", "SecondContentA!") == "OK"); // 15 bytes
+        assert(fs.write("/fileA.txt", "FinalLongerContentForFileA") == "OK"); // 26 bytes
+        pisf::StorageStats s2 = fs.get_storage_stats();
+        assert(s2.total_blob_bytes == 15 + 15 + 26); // 56 bytes
+        assert(s2.live_bytes == 26);
+        assert(s2.reclaimable_bytes == 30); // 15 + 15 dead bytes
+        assert(s2.live_files == 1);
+
+        // 3. Create and delete another file
+        assert(fs.create("/fileB.txt") == "OK");
+        assert(fs.write("/fileB.txt", "FileBToBeDeleted") == "OK"); // 16 bytes
+        pisf::StorageStats s3 = fs.get_storage_stats();
+        assert(s3.total_blob_bytes == 56 + 16); // 72 bytes
+        assert(s3.live_bytes == 26 + 16); // 42 bytes
+        assert(s3.reclaimable_bytes == 30);
+        assert(s3.live_files == 2);
+
+        assert(fs.rm("/fileB.txt") == "OK");
+        // 4. Confirm reclaimable bytes increase
+        pisf::StorageStats s4 = fs.get_storage_stats();
+        assert(s4.total_blob_bytes == 72);
+        assert(s4.live_bytes == 26);
+        assert(s4.reclaimable_bytes == 46); // 30 + 16 dead bytes
+        assert(s4.live_files == 1);
+
+        // 5. Compact
+        std::string err;
+        assert(fs.compact(err));
+
+        // 6. Confirm live contents remain identical
+        assert(fs.read("/fileA.txt") == "FinalLongerContentForFileA");
+        assert(!fs.exists("/fileB.txt"));
+
+        // 7. Confirm reclaimable bytes decrease to 0
+        pisf::StorageStats s5 = fs.get_storage_stats();
+        assert(s5.active_generation == 1);
+        assert(s5.live_files == 1);
+        assert(s5.live_bytes == 26);
+        assert(s5.total_blob_bytes == 26);
+        assert(s5.reclaimable_bytes == 0);
+
+        // 8. Confirm the new active blob contains only live file contents
+        std::string gen1_path = temp_dir + "/data-1.blob";
+        assert(std::filesystem::exists(gen1_path));
+        assert(std::filesystem::file_size(gen1_path) == 26);
+        assert(!std::filesystem::exists(temp_dir + "/data.blob"));
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -1950,6 +2030,7 @@ int main() {
     test_compaction_crash_after_new_blob_synced_before_metadata_commit();
     test_compaction_crash_during_old_generation_cleanup();
     test_compaction_legacy_generation_0_recovery();
+    test_storage_stats_and_space_reclamation();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;
