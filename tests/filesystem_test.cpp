@@ -2045,6 +2045,205 @@ void test_storage_integrity_empty_file_boundaries() {
     std::cout << "PASSED\n";
 }
 
+void test_concurrent_reads_while_file_is_renamed() {
+    std::cout << "Running test_concurrent_reads_while_file_is_renamed... ";
+    std::string path_template = "/tmp/pisf-c-read-rename-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/file.txt") == "OK");
+        assert(fs.write("/file.txt", "StablePayloadData") == "OK");
+
+        uint64_t initial_off = 0, initial_len = 0;
+        assert(fs.get_node_extent("/file.txt", initial_off, initial_len));
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> successful_reads{0};
+
+        auto reader_fn = [&]() {
+            while (!stop.load(std::memory_order_relaxed)) {
+                std::string content;
+                std::string err;
+                if (fs.read("/file.txt", content, err)) {
+                    assert(content == "StablePayloadData");
+                    successful_reads.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    assert(err.find("not found") != std::string::npos ||
+                           err.find("does not exist") != std::string::npos ||
+                           err.find("ERR") != std::string::npos);
+                }
+
+                if (fs.read("/renamed.txt", content, err)) {
+                    assert(content == "StablePayloadData");
+                    successful_reads.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        std::vector<std::thread> readers;
+        for (int i = 0; i < 4; ++i) {
+            readers.emplace_back(reader_fn);
+        }
+
+        // Mutation thread alternates rename
+        for (int iter = 0; iter < 40; ++iter) {
+            assert(fs.mv("/file.txt", "/renamed.txt") == "OK");
+            assert(fs.mv("/renamed.txt", "/file.txt") == "OK");
+        }
+
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& t : readers) {
+            t.join();
+        }
+
+        assert(successful_reads.load() > 0);
+        // Final state: /file.txt exists with unchanged extent
+        uint64_t final_off = 0, final_len = 0;
+        assert(fs.get_node_extent("/file.txt", final_off, final_len));
+        assert(final_off == initial_off);
+        assert(final_len == initial_len);
+        assert(fs.read("/file.txt") == "StablePayloadData");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_concurrent_reads_while_file_is_deleted() {
+    std::cout << "Running test_concurrent_reads_while_file_is_deleted... ";
+    std::string path_template = "/tmp/pisf-c-read-delete-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/target.txt") == "OK");
+        assert(fs.write("/target.txt", "TargetContentForDeletion") == "OK");
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> valid_reads{0};
+        std::atomic<int> missing_reads{0};
+
+        auto reader_fn = [&]() {
+            while (!stop.load(std::memory_order_relaxed)) {
+                std::string content;
+                std::string err;
+                if (fs.read("/target.txt", content, err)) {
+                    assert(content == "TargetContentForDeletion");
+                    valid_reads.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    missing_reads.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        std::vector<std::thread> readers;
+        for (int i = 0; i < 4; ++i) {
+            readers.emplace_back(reader_fn);
+        }
+
+        std::this_thread::yield();
+
+        // Delete file while readers are querying
+        assert(fs.rm("/target.txt") == "OK");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& t : readers) {
+            t.join();
+        }
+
+        assert(!fs.exists("/target.txt"));
+        assert(missing_reads.load() > 0);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_concurrent_compaction_with_active_readers_and_writers() {
+    std::cout << "Running test_concurrent_compaction_with_active_readers_and_writers... ";
+    std::string path_template = "/tmp/pisf-c-compact-stress-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        for (int i = 0; i < 4; ++i) {
+            std::string path = "/file" + std::to_string(i) + ".txt";
+            assert(fs.create(path) == "OK");
+            assert(fs.write(path, "InitialContent" + std::to_string(i)) == "OK");
+        }
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> read_ops{0};
+        std::atomic<int> write_ops{0};
+
+        // Reader threads
+        auto reader_fn = [&](int id) {
+            std::string path = "/file" + std::to_string(id) + ".txt";
+            while (!stop.load(std::memory_order_relaxed)) {
+                std::string content;
+                std::string err;
+                if (fs.read(path, content, err)) {
+                    assert(content.find("Content" + std::to_string(id)) != std::string::npos);
+                    read_ops.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        // Writer thread
+        auto writer_fn = [&]() {
+            int ver = 1;
+            while (!stop.load(std::memory_order_relaxed)) {
+                std::string path = "/file0.txt";
+                std::string res = fs.write(path, "UpdatedContent0_v" + std::to_string(ver++));
+                if (res == "OK") {
+                    write_ops.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 4; ++i) {
+            threads.emplace_back(reader_fn, i);
+        }
+        threads.emplace_back(writer_fn);
+
+        // Run repeated compactions concurrently
+        for (int c = 0; c < 3; ++c) {
+            std::string err;
+            assert(fs.compact(err));
+            assert(err.empty());
+        }
+
+        stop.store(true, std::memory_order_relaxed);
+        for (auto& t : threads) {
+            t.join();
+        }
+
+        assert(read_ops.load() > 0);
+        assert(fs.blob_generation() == 3);
+
+        // All 4 files must be readable and valid
+        for (int i = 0; i < 4; ++i) {
+            std::string path = "/file" + std::to_string(i) + ".txt";
+            std::string content = fs.read(path);
+            assert(!content.empty());
+            assert(content.find("Content" + std::to_string(i)) != std::string::npos);
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -2130,6 +2329,11 @@ int main() {
     test_storage_integrity_truncated_blob_rejected();
     test_storage_integrity_missing_active_generation_rejected();
     test_storage_integrity_empty_file_boundaries();
+
+    // Milestone 9 Checkpoint C — Concurrent Filesystem Stress
+    test_concurrent_reads_while_file_is_renamed();
+    test_concurrent_reads_while_file_is_deleted();
+    test_concurrent_compaction_with_active_readers_and_writers();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;
