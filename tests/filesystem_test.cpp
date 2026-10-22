@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -2244,6 +2245,149 @@ void test_concurrent_compaction_with_active_readers_and_writers() {
     std::cout << "PASSED\n";
 }
 
+// ---------------------------------------------------------------------------
+// Milestone 9 Checkpoint D — Compaction Performance Measurement
+// ---------------------------------------------------------------------------
+// Verifies that compact() completes within a generous wall-clock bound and
+// correctly reclaims obsolete blob space. Measurements are printed for
+// documentation but do not gate the test (beyond the time bound).
+// ---------------------------------------------------------------------------
+
+struct CompactionMeasurement {
+    std::string label;
+    uint64_t blob_bytes_before{0};
+    uint64_t live_bytes{0};
+    uint64_t blob_bytes_after{0};
+    double   compaction_ms{0.0};
+    double   throughput_mb_s{0.0};
+    double   space_reclaim_pct{0.0};
+};
+
+static CompactionMeasurement run_compaction_benchmark(
+        const std::string& label,
+        int n_files,
+        const std::string& content,
+        int overwrites) {
+    using Clock = std::chrono::steady_clock;
+    using Ms    = std::chrono::duration<double, std::milli>;
+
+    std::string path_template = "/tmp/pisf-bench-d-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    CompactionMeasurement result;
+    result.label = label;
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.is_initialized());
+
+        for (int i = 0; i < n_files; ++i) {
+            std::string path = "/f" + std::to_string(i) + ".txt";
+            assert(fs.create(path) == "OK");
+            assert(fs.write(path, content) == "OK");
+        }
+
+        // Overwrite every other file (creates obsolete extents)
+        for (int ow = 0; ow < overwrites; ++ow) {
+            for (int i = 0; i < n_files; i += 2) {
+                std::string path = "/f" + std::to_string(i) + ".txt";
+                assert(fs.write(path, "OW_" + std::to_string(ow) + "_" + content) == "OK");
+            }
+        }
+
+        auto stats_before = fs.get_storage_stats();
+        result.blob_bytes_before = stats_before.total_blob_bytes;
+        result.live_bytes        = stats_before.live_bytes;
+
+        // Measure compaction time under exclusive lock
+        auto t0 = Clock::now();
+        std::string err;
+        assert(fs.compact(err));
+        auto t1 = Clock::now();
+
+        result.compaction_ms = Ms(t1 - t0).count();
+        result.throughput_mb_s = (static_cast<double>(result.live_bytes) / (1024.0 * 1024.0))
+                                 / (result.compaction_ms / 1000.0);
+
+        auto stats_after = fs.get_storage_stats();
+        result.blob_bytes_after = stats_after.total_blob_bytes;
+
+        if (result.blob_bytes_before > 0) {
+            double reclaimed = static_cast<double>(
+                static_cast<int64_t>(result.blob_bytes_before)
+                - static_cast<int64_t>(result.blob_bytes_after));
+            result.space_reclaim_pct = 100.0 * reclaimed
+                                       / static_cast<double>(result.blob_bytes_before);
+        }
+
+        // Verify compacted blob equals live bytes
+        assert(result.blob_bytes_after == result.live_bytes);
+
+        // All files remain readable after compaction
+        for (int i = 0; i < n_files; ++i) {
+            std::string path = "/f" + std::to_string(i) + ".txt";
+            std::string c, e;
+            assert(fs.read(path, c, e));
+            assert(!c.empty());
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    return result;
+}
+
+void test_compaction_performance_measurements() {
+    std::cout << "Running test_compaction_performance_measurements... \n";
+
+    // Generous wall-clock bound: 60 s per workload (each write does fdatasync).
+    // This is a correctness + documentation test, not a performance gate beyond
+    // the generous bound.
+    constexpr double kTimeLimitMs = 60'000.0;
+
+    struct WorkloadSpec {
+        std::string label;
+        int         n_files;
+        std::string content;
+        int         overwrites;
+    };
+
+    const std::vector<WorkloadSpec> workloads = {
+        {"20 files x 256B, 3 overwrites of every-other",
+         20, std::string(256, 'A'), 3},
+        {"40 files x 256B, 0 overwrites (nearly 100% live)",
+         40, std::string(256, 'B'), 0},
+        {"5 files x 4KB, 2 overwrites of every-other",
+         5, std::string(4096, 'C'), 2},
+        {"10 files x 512B, 10 overwrites (high obsolete ratio)",
+         10, std::string(512, 'D'), 10},
+    };
+
+    std::cout << "\n  --- Compaction Performance Measurements ---\n";
+    for (const auto& wl : workloads) {
+        auto m = run_compaction_benchmark(wl.label, wl.n_files, wl.content, wl.overwrites);
+        std::cout << "  [" << m.label << "]\n"
+                  << "    Blob before:      " << m.blob_bytes_before << " bytes\n"
+                  << "    Live bytes:       " << m.live_bytes << " bytes\n"
+                  << "    Blob after:       " << m.blob_bytes_after << " bytes\n"
+                  << "    Compaction time:  " << m.compaction_ms << " ms\n"
+                  << "    Copy throughput:  " << m.throughput_mb_s << " MB/s\n"
+                  << "    Space reclaimed:  " << m.space_reclaim_pct << " %\n\n";
+
+        // Assert compaction completes within generous bound
+        assert(m.compaction_ms < kTimeLimitMs
+               && "Compaction exceeded 60 s time limit for small workload");
+        // After compaction, blob must not exceed live data
+        assert(m.blob_bytes_after <= m.live_bytes + 64 /* metadata rounding */);
+    }
+
+    std::cout << "  ------------------------------------------\n";
+    std::cout << "PASSED\n";
+}
+
+// ---------------------------------------------------------------------------
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -2334,6 +2478,9 @@ int main() {
     test_concurrent_reads_while_file_is_renamed();
     test_concurrent_reads_while_file_is_deleted();
     test_concurrent_compaction_with_active_readers_and_writers();
+
+    // Milestone 9 Checkpoint D — Compaction Performance Measurements
+    test_compaction_performance_measurements();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;
