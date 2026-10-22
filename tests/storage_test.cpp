@@ -392,6 +392,44 @@ void test_storage_shared_ptr_reader_safety_on_unlink() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_boundary_reads_and_overflow() {
+    std::cout << "Running test_storage_boundary_reads_and_overflow... ";
+    std::string base_dir = create_test_temp_dir();
+
+    pisf::BlobStorage storage(base_dir, "data.blob");
+    std::string err;
+    assert(storage.init(err));
+
+    uint64_t off = 0, len = 0;
+    std::string payload = "HelloBoundaryValidation";
+    assert(storage.append(payload, off, len, err));
+    assert(storage.get_size() == payload.size());
+
+    std::string out;
+    // 1. Zero-length read at offset 0
+    assert(storage.read_range(0, 0, out, err));
+    assert(out.empty());
+
+    // 2. Zero-length read at exact EOF
+    assert(storage.read_range(payload.size(), 0, out, err));
+    assert(out.empty());
+
+    // 3. Zero-length read past EOF must fail
+    assert(!storage.read_range(payload.size() + 1, 0, out, err));
+    assert(err.find("exceeds blob size") != std::string::npos);
+
+    // 4. Extreme offset arithmetic overflow
+    assert(!storage.read_range(UINT64_MAX, 1, out, err));
+    assert(err.find("overflow") != std::string::npos);
+
+    assert(!storage.read_range(UINT64_MAX / 2 + 1, UINT64_MAX / 2 + 1, out, err));
+    assert(err.find("overflow") != std::string::npos);
+
+    storage.close();
+    cleanup_test_dir(base_dir);
+    std::cout << "PASSED\n";
+}
+
 } // namespace
 
 int main() {
@@ -408,6 +446,7 @@ int main() {
     test_storage_sync_failure_simulation();
     test_storage_generation_naming_and_accessors();
     test_storage_shared_ptr_reader_safety_on_unlink();
+    test_storage_boundary_reads_and_overflow();
     std::cout << "All persistent storage unit tests passed successfully!\n";
     return 0;
 }

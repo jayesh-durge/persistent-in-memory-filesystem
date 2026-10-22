@@ -1951,6 +1951,100 @@ void test_storage_stats_and_space_reclamation() {
     std::cout << "PASSED\n";
 }
 
+void test_storage_integrity_truncated_blob_rejected() {
+    std::cout << "Running test_storage_integrity_truncated_blob_rejected... ";
+    std::string path_template = "/tmp/pisf-b-trunc-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/data.bin") == "OK");
+        std::string long_content(100, 'X');
+        assert(fs.write("/data.bin", long_content) == "OK");
+    }
+
+    // Truncate data.blob to 50 bytes (less than the 100 bytes referenced by metadata)
+    std::string blob_path = temp_dir + "/data.blob";
+    assert(::truncate(blob_path.c_str(), 50) == 0);
+    assert(std::filesystem::file_size(blob_path) == 50);
+
+    // Reopen: startup must fail and refuse to initialize an empty filesystem
+    {
+        pisf::Filesystem fs2(temp_dir);
+        assert(!fs2.is_initialized());
+        assert(fs2.init_error().find("exceeds blob size") != std::string::npos);
+        // It must NOT have wiped the directory or created an empty root
+        assert(std::filesystem::file_size(blob_path) == 50);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_storage_integrity_missing_active_generation_rejected() {
+    std::cout << "Running test_storage_integrity_missing_active_generation_rejected... ";
+    std::string path_template = "/tmp/pisf-b-missing-gen-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/file.txt") == "OK");
+        assert(fs.write("/file.txt", "SomeImportantData") == "OK");
+        std::string err;
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 1);
+        assert(std::filesystem::exists(temp_dir + "/data-1.blob"));
+    }
+
+    // Delete active generation file data-1.blob
+    std::error_code ec;
+    std::filesystem::remove(temp_dir + "/data-1.blob", ec);
+    assert(!std::filesystem::exists(temp_dir + "/data-1.blob"));
+
+    // Reopen: must report missing active generation and NOT silently initialize empty filesystem
+    {
+        pisf::Filesystem fs2(temp_dir);
+        assert(!fs2.is_initialized());
+        assert(fs2.init_error().find("missing blob for active generation") != std::string::npos);
+    }
+
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
+void test_storage_integrity_empty_file_boundaries() {
+    std::cout << "Running test_storage_integrity_empty_file_boundaries... ";
+    std::string path_template = "/tmp/pisf-b-empty-XXXXXX";
+    std::string temp_dir = ::mkdtemp(path_template.data());
+    assert(!temp_dir.empty());
+
+    {
+        pisf::Filesystem fs(temp_dir);
+        assert(fs.create("/empty.txt") == "OK");
+        assert(fs.exists("/empty.txt"));
+        assert(fs.stat("/empty.txt").find("type=file") != std::string::npos);
+
+        std::string content;
+        std::string err;
+        assert(fs.read("/empty.txt", content, err));
+        assert(content.empty());
+        assert(fs.read("/empty.txt") == "");
+
+        // Compact filesystem containing empty file
+        assert(fs.compact(err));
+        assert(fs.blob_generation() == 1);
+        assert(fs.exists("/empty.txt"));
+        assert(fs.read("/empty.txt") == "");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(temp_dir, ec);
+    std::cout << "PASSED\n";
+}
+
 int main() {
     std::cout << "=== PISF In-Memory Filesystem Unit Tests ===\n";
 
@@ -2031,6 +2125,11 @@ int main() {
     test_compaction_crash_during_old_generation_cleanup();
     test_compaction_legacy_generation_0_recovery();
     test_storage_stats_and_space_reclamation();
+
+    // Milestone 9 Checkpoint B — Storage Integrity Validation
+    test_storage_integrity_truncated_blob_rejected();
+    test_storage_integrity_missing_active_generation_rejected();
+    test_storage_integrity_empty_file_boundaries();
 
     std::cout << "All filesystem unit tests passed successfully!\n";
     return 0;
