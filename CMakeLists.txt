@@ -91,3 +91,13 @@ add_test(
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke_test.sh ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+add_test(
+    NAME recovery_test
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/recovery_test.sh ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+add_test(
+    NAME lifecycle_test
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_test.sh ${CMAKE_CURRENT_BINARY_DIR}
+)
+
