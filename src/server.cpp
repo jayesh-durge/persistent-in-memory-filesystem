@@ -54,8 +54,7 @@ void trigger_shutdown() {
 }
 
 void signal_handler(int sig) {
-    static_cast<void>(sig);
-    g_signal_received = 1;
+    g_signal_received = sig;
     g_shutdown_requested.store(true, std::memory_order_relaxed);
     if (g_wake_pipe[1] >= 0) {
         char b = 'q';
@@ -446,7 +445,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << "=== PISF Server (Persistent Filesystem Daemon) ===\n"
               << "Socket path:  " << socket_path << "\n"
-              << "Storage path: " << (g_fs.storage() ? g_fs.storage()->data_dir() : data_dir) << "\n";
+              << "Storage path: " << (g_fs.storage() ? g_fs.storage()->data_dir() : data_dir) << "\n"
+              << "[Info] Storage initialized: active generation " << g_fs.blob_generation()
+              << ", " << g_fs.total_nodes() << " nodes loaded\n";
 
     // Check for existing socket file and handle stale socket safely
     std::string err;
@@ -576,7 +577,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    log_msg("\n[Info] Shutting down server gracefully...");
+    if (g_signal_received == SIGINT) {
+        log_msg("\n[Info] Received SIGINT (Ctrl+C) -> shutting down server gracefully...");
+    } else if (g_signal_received == SIGTERM) {
+        log_msg("\n[Info] Received SIGTERM -> shutting down server gracefully...");
+    } else {
+        log_msg("\n[Info] Shutting down server gracefully...");
+    }
 
     // Stop accepting new connections
     ::close(listen_fd);
@@ -607,6 +614,8 @@ int main(int argc, char* argv[]) {
     } else {
         log_msg("[Info] Socket file successfully removed: " + socket_path);
     }
+
+    log_msg("[Info] Server shutdown complete.");
 
     return 0;
 }
