@@ -111,3 +111,8 @@ add_test(
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/demo.sh ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+add_test(
+    NAME storage_demo
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/storage_demo.sh ${CMAKE_CURRENT_BINARY_DIR}
+)
+
