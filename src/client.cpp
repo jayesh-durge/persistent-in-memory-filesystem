@@ -8,11 +8,11 @@
 namespace {
 
 void print_usage(const char* prog_name) {
-    std::cout << "Usage: " << prog_name << " [options] [command]\n"
+    std::cout << "Usage: " << prog_name << " [options] [command [args...]]\n\n"
               << "Options:\n"
-              << "  -s, --socket <path>   Set Unix domain socket path\n"
+              << "  -s, --socket <path>   Set Unix domain socket path (default: /tmp/pisf.sock)\n"
               << "  -h, --help            Show this help message\n\n"
-              << "If no command is provided, starts an interactive command loop (REPL).\n"
+              << "If no command is provided, starts an interactive command loop (REPL).\n\n"
               << "Supported commands:\n"
               << "  PING                  Checks server liveness (expects PONG)\n"
               << "  QUIT                  Ends the current client session\n"
@@ -21,8 +21,14 @@ void print_usage(const char* prog_name) {
               << "  CREATE <path>         Creates an empty file\n"
               << "  LS <path>             Lists directory contents\n"
               << "  STAT <path>           Displays node metadata\n"
-              << "  WRITE <path> [content] Writes content to a file\n"
-              << "  READ <path>           Reads content from a file\n";
+              << "  WRITE <path> [data]   Writes content to a file\n"
+              << "  READ <path>           Reads content from a file\n"
+              << "  RM <path>             Deletes a regular file\n"
+              << "  RMDIR <path>          Removes an empty directory\n"
+              << "  MV <src> <dst>        Renames or moves a file or directory\n"
+              << "  STATS                 Displays storage consumption & reclamation stats\n"
+              << "  COMPACT               Compacts active blob storage into a new generation\n"
+              << "  HELP                  Displays supported commands\n";
 }
 
 bool execute_single_command(int client_fd, const std::string& cmd, std::string& recv_buffer, std::string& response_out) {
@@ -105,16 +111,18 @@ int main(int argc, char* argv[]) {
         std::string response;
         if (execute_single_command(client_fd, single_command, recv_buffer, response)) {
             std::cout << "[Response] " << response << "\n";
+            ::close(client_fd);
+            return 0;
         }
         ::close(client_fd);
-        return 0;
+        return 1;
     }
 
     // Interactive / stream command loop
     bool is_interactive = (isatty(STDIN_FILENO) != 0);
     if (is_interactive) {
         std::cout << "Connected to PISF server at " << socket_path << "\n"
-                  << "Type commands (e.g., PING, QUIT). Press Ctrl+D to exit.\n";
+                  << "Type commands (e.g., PING, QUIT, HELP). Press Ctrl+D to exit.\n";
     }
 
     std::string line;
@@ -132,6 +140,11 @@ int main(int argc, char* argv[]) {
         }
 
         if (line.empty()) {
+            continue;
+        }
+
+        if (line == "help" || line == "HELP" || line == "?") {
+            print_usage("pisf-client");
             continue;
         }
 

@@ -88,27 +88,6 @@ void print_usage(const char* prog_name) {
 
 // Dispatches a single client command. Returns false if the client session should terminate.
 bool handle_client_command(const std::string& request, int client_fd, std::string& err) {
-    if (request == "PING") {
-        if (!pisf::send_line(client_fd, "PONG", err)) {
-            return false;
-        }
-        log_msg("[Info] Handled PING -> PONG (fd: " + std::to_string(client_fd) + ")");
-        return true;
-    }
-
-    if (request == "QUIT") {
-        pisf::send_line(client_fd, "BYE", err);
-        log_msg("[Info] Handled QUIT -> BYE (closing client connection, fd: " + std::to_string(client_fd) + ")");
-        return false;
-    }
-
-    if (request == "SHUTDOWN") {
-        pisf::send_line(client_fd, "OK SHUTDOWN", err);
-        log_msg("[Info] Handled SHUTDOWN -> initiating graceful server shutdown (fd: " + std::to_string(client_fd) + ")");
-        trigger_shutdown();
-        return false;
-    }
-
     if (request.empty()) {
         if (!pisf::send_line(client_fd, "ERR empty command", err)) {
             return false;
@@ -129,7 +108,8 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
     std::string verb;
     std::string arg;
     if (space_pos == std::string::npos) {
-        verb = request.substr(start);
+        size_t end = request.find_last_not_of(" \t\r\n");
+        verb = request.substr(start, end - start + 1);
     } else {
         verb = request.substr(start, space_pos - start);
         size_t arg_start = request.find_first_not_of(" \t", space_pos);
@@ -137,6 +117,32 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
             size_t arg_end = request.find_last_not_of(" \t\r\n");
             arg = request.substr(arg_start, arg_end - arg_start + 1);
         }
+    }
+
+    if (verb == "PING") {
+        if (!arg.empty()) {
+            std::string err_resp = "ERR unknown command '" + request + "'";
+            log_msg("[Info] " + err_resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, err_resp, err);
+        }
+        if (!pisf::send_line(client_fd, "PONG", err)) {
+            return false;
+        }
+        log_msg("[Info] Handled PING -> PONG (fd: " + std::to_string(client_fd) + ")");
+        return true;
+    }
+
+    if (verb == "QUIT") {
+        pisf::send_line(client_fd, "BYE", err);
+        log_msg("[Info] Handled QUIT -> BYE (closing client connection, fd: " + std::to_string(client_fd) + ")");
+        return false;
+    }
+
+    if (verb == "SHUTDOWN") {
+        pisf::send_line(client_fd, "OK SHUTDOWN", err);
+        log_msg("[Info] Handled SHUTDOWN -> initiating graceful server shutdown (fd: " + std::to_string(client_fd) + ")");
+        trigger_shutdown();
+        return false;
     }
 
     if (verb == "MKDIR") {
@@ -281,6 +287,38 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         }
         std::string resp = g_fs.read(arg);
         log_msg("[Info] Handled READ '" + arg + "' -> '" + resp + "' (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
+    if (verb == "STATS") {
+        auto stats = g_fs.get_storage_stats();
+        std::string resp = "OK total_blob_bytes=" + std::to_string(stats.total_blob_bytes) +
+                           " live_bytes=" + std::to_string(stats.live_bytes) +
+                           " reclaimable_bytes=" + std::to_string(stats.reclaimable_bytes) +
+                           " active_generation=" + std::to_string(stats.active_generation) +
+                           " live_files=" + std::to_string(stats.live_files);
+        log_msg("[Info] Handled STATS -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_line(client_fd, resp, err);
+    }
+
+    if (verb == "COMPACT") {
+        std::string compact_err;
+        if (g_fs.compact(compact_err)) {
+            auto stats = g_fs.get_storage_stats();
+            std::string resp = "OK COMPACT generation=" + std::to_string(stats.active_generation) +
+                               " live_bytes=" + std::to_string(stats.live_bytes);
+            log_msg("[Info] Handled COMPACT -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        } else {
+            std::string resp = "ERR compact failed: " + compact_err;
+            log_msg("[Info] Handled COMPACT -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+            return pisf::send_line(client_fd, resp, err);
+        }
+    }
+
+    if (verb == "HELP") {
+        std::string resp = "OK commands: PING QUIT SHUTDOWN MKDIR CREATE LS STAT WRITE READ RM RMDIR MV STATS COMPACT";
+        log_msg("[Info] Handled HELP (fd: " + std::to_string(client_fd) + ")");
         return pisf::send_line(client_fd, resp, err);
     }
 

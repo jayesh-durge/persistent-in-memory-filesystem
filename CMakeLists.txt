@@ -101,3 +101,8 @@ add_test(
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_test.sh ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+add_test(
+    NAME client_test
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/client_test.sh ${CMAKE_CURRENT_BINARY_DIR}
+)
+
