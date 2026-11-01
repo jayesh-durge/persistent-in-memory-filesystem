@@ -754,7 +754,11 @@ std::string Filesystem::stat(const std::string& path) const {
     }
 
     const Node& node = it->second;
-    return "name=" + node.name + " type=" + to_string(node.type) + " id=" + std::to_string(node.id);
+    std::string result = "name=" + node.name + " type=" + to_string(node.type) + " id=" + std::to_string(node.id);
+    if (node.type == NodeType::File) {
+        result += " content_length=" + std::to_string(node.content_length);
+    }
+    return result;
 }
 
 std::string Filesystem::write(const std::string& path, const std::string& content) {

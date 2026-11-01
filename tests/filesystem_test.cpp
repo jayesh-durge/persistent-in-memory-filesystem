@@ -76,19 +76,85 @@ void test_stat_metadata() {
     fs.mkdir("/docs");
     fs.create("/docs/guide.txt");
 
+    // Directories do not carry a content_length field
     std::string root_stat = fs.stat("/");
     assert(root_stat == "name=/ type=directory id=1");
 
     std::string dir_stat = fs.stat("/docs");
     assert(dir_stat.rfind("name=docs type=directory id=", 0) == 0);
+    assert(dir_stat.find("content_length=") == std::string::npos);
 
+    // Empty file reports content_length=0
     std::string file_stat = fs.stat("/docs/guide.txt");
     assert(file_stat.rfind("name=guide.txt type=file id=", 0) == 0);
+    assert(file_stat.find("content_length=0") != std::string::npos);
 
     // Non-existent target stat
     std::string missing_stat = fs.stat("/missing.txt");
     assert(missing_stat.rfind("ERR not found", 0) == 0);
 
+    std::cout << "PASSED\n";
+}
+
+void test_stat_content_length() {
+    std::cout << "Running test_stat_content_length... ";
+    pisf::Filesystem fs;
+
+    // Empty file: content_length=0
+    assert(fs.create("/empty.txt") == "OK");
+    std::string s1 = fs.stat("/empty.txt");
+    assert(s1.find("type=file") != std::string::npos);
+    assert(s1.find("content_length=0") != std::string::npos);
+
+    // File with data: content_length matches byte count
+    assert(fs.create("/hello.txt") == "OK");
+    assert(fs.write("/hello.txt", "hello world") == "OK");   // 11 bytes
+    std::string s2 = fs.stat("/hello.txt");
+    assert(s2.find("content_length=11") != std::string::npos);
+
+    // After overwrite: length reflects new content, not cumulative blob bytes
+    assert(fs.write("/hello.txt", "hi") == "OK");            // 2 bytes
+    std::string s3 = fs.stat("/hello.txt");
+    assert(s3.find("content_length=2") != std::string::npos);
+
+    // Directory: no content_length field
+    assert(fs.mkdir("/mydir") == "OK");
+    std::string s4 = fs.stat("/mydir");
+    assert(s4.find("type=directory") != std::string::npos);
+    assert(s4.find("content_length=") == std::string::npos);
+
+    // Root directory: no content_length field
+    std::string s5 = fs.stat("/");
+    assert(s5.find("content_length=") == std::string::npos);
+
+    std::cout << "PASSED\n";
+}
+
+void test_stat_content_length_after_restart() {
+    std::cout << "Running test_stat_content_length_after_restart... ";
+    std::string dir = pisf::get_default_storage_dir() + "/stat_restart_test_" + std::to_string(getpid());
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    {
+        pisf::Filesystem fs(dir);
+        assert(fs.is_initialized());
+        assert(fs.create("/persist.txt") == "OK");
+        assert(fs.write("/persist.txt", "durable content") == "OK");   // 15 bytes
+        std::string s = fs.stat("/persist.txt");
+        assert(s.find("content_length=15") != std::string::npos);
+    }
+
+    // Restart: reload from disk
+    {
+        pisf::Filesystem fs(dir);
+        assert(fs.is_initialized());
+        std::string s = fs.stat("/persist.txt");
+        assert(s.find("type=file") != std::string::npos);
+        assert(s.find("content_length=15") != std::string::npos);
+    }
+
+    std::filesystem::remove_all(dir);
     std::cout << "PASSED\n";
 }
 
@@ -602,11 +668,11 @@ void test_filesystem_restore_from_metadata() {
         assert(fs.ls("/") == "workspace");
         assert(fs.ls("/workspace") == "doc.txt");
         assert(fs.read("/workspace/doc.txt") == content);
-        assert(fs.stat("/workspace/doc.txt") == "name=doc.txt type=file id=3");
+        assert(fs.stat("/workspace/doc.txt") == "name=doc.txt type=file id=3 content_length=23");
 
         // Create new file and verify NodeId continues from restored next_node_id (5)
         assert(fs.create("/workspace/new.txt") == "OK");
-        assert(fs.stat("/workspace/new.txt") == "name=new.txt type=file id=5");
+        assert(fs.stat("/workspace/new.txt") == "name=new.txt type=file id=5 content_length=0");
     }
 
     std::error_code ec;
@@ -1208,7 +1274,9 @@ void test_rmdir_rejects_file() {
 
     assert(fs.create("/afile.txt") == "OK");
     std::string resp = fs.rmdir("/afile.txt");
+    // Must be a clear "not a directory" error, not "not a file"
     assert(resp.find("ERR") != std::string::npos);
+    assert(resp.find("not a directory") != std::string::npos);
     assert(fs.exists("/afile.txt"));
     std::cout << "PASSED\n";
 }
@@ -2395,6 +2463,8 @@ int main() {
     test_create_and_mkdir();
     test_listing_and_sorting();
     test_stat_metadata();
+    test_stat_content_length();
+    test_stat_content_length_after_restart();
     test_missing_and_invalid_parents();
     test_duplicate_names();
     test_identical_names_in_different_dirs();
