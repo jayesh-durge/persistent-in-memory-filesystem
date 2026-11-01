@@ -231,3 +231,4 @@ echo -e "\n${BOLD}${GREEN}======================================================
 echo -e "${BOLD}${GREEN}   STORAGE & PERFORMANCE DEMONSTRATION: COMPLETED SUCCESSFULLY!       ${RESET}"
 echo -e "${BOLD}${GREEN}======================================================================${RESET}"
 exit 0
+
