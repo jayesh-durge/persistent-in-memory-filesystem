@@ -54,6 +54,7 @@ add_executable(storage_test
     src/storage.cpp
 )
 target_link_libraries(storage_test PRIVATE pisf_compiler_flags Threads::Threads)
+target_compile_options(storage_test PRIVATE -UNDEBUG)
 
 add_test(
     NAME storage_test
@@ -67,6 +68,7 @@ add_executable(metadata_test
     src/storage.cpp
 )
 target_link_libraries(metadata_test PRIVATE pisf_compiler_flags Threads::Threads)
+target_compile_options(metadata_test PRIVATE -UNDEBUG)
 
 add_test(
     NAME metadata_test
@@ -80,6 +82,7 @@ add_executable(filesystem_test
     src/metadata.cpp
 )
 target_link_libraries(filesystem_test PRIVATE pisf_compiler_flags Threads::Threads)
+target_compile_options(filesystem_test PRIVATE -UNDEBUG)
 
 add_test(
     NAME filesystem_test
