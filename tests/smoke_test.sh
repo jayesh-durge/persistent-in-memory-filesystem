@@ -125,7 +125,26 @@ echo "PASSED"
 echo -n "[Test 5/20] Idle Client A does not block concurrent Client B... "
 # Client A connects and sits idle holding the connection
 python3 -c "
-import socket, time
+import socket, struct, time
+
+def recv_exact(sock, length):
+    data = b''
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk:
+            raise EOFError('unexpected end of framed message')
+        data += chunk
+    return data
+
+def send_frame(sock, payload):
+    payload = payload if isinstance(payload, bytes) else payload.encode()
+    sock.sendall(b'\x01' + struct.pack('!I', len(payload)) + payload)
+
+def recv_frame(sock):
+    header = recv_exact(sock, 5)
+    assert header[0] == 1
+    return recv_exact(sock, struct.unpack('!I', header[1:])[0]).decode()
+
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect('${TEST_SOCK}')
 # Tell shell we are connected
@@ -133,10 +152,11 @@ with open('${TEST_TMP_DIR}/client_a_connected', 'w') as f:
     f.write('connected')
 time.sleep(1.0)
 # Send PING after delay
-s.sendall(b'PING\n')
-resp = s.recv(1024).decode()
+send_frame(s, 'PING')
+resp = recv_frame(s)
 assert 'PONG' in resp
-s.sendall(b'QUIT\n')
+send_frame(s, 'QUIT')
+assert recv_frame(s) == 'BYE'
 s.close()
 " >/dev/null 2>&1 &
 PYTHON_CLIENT_A_PID=$!
@@ -351,25 +371,27 @@ echo "PASSED"
 
 # Test 11: Invalid path syntax, normalization, and malformed commands
 echo -n "[Test 11/20] Invalid path syntax, normalization, and malformed commands... "
-# Relative path rejection
+# Relative paths are accepted and still report a missing intermediate directory.
 REL_MKDIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" MKDIR relative/path)
-if ! echo "${REL_MKDIR}" | grep -q "\[Response\] ERR invalid path"; then
-    echo "FAILED (relative path should be rejected: ${REL_MKDIR})"
+if ! echo "${REL_MKDIR}" | grep -q "\[Response\] ERR not found"; then
+    echo "FAILED (missing intermediate directory should be reported: ${REL_MKDIR})"
     exit 1
 fi
 
-# '.' and '..' rejection
+# Dot navigation is normalized by the server before resolving the path.
 DOT_CREATE=$("${CLIENT_BIN}" -s "${TEST_SOCK}" CREATE /projects/./foo)
-if ! echo "${DOT_CREATE}" | grep -q "\[Response\] ERR invalid path component"; then
-    echo "FAILED ('.' should be rejected: ${DOT_CREATE})"
+if ! echo "${DOT_CREATE}" | grep -q "\[Response\] OK"; then
+    echo "FAILED ('.' path component should normalize: ${DOT_CREATE})"
     exit 1
 fi
+"${CLIENT_BIN}" -s "${TEST_SOCK}" RM /projects/foo >/dev/null
 
 DOTDOT_MKDIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" MKDIR /projects/../foo)
-if ! echo "${DOTDOT_MKDIR}" | grep -q "\[Response\] ERR invalid path component"; then
-    echo "FAILED ('..' should be rejected: ${DOTDOT_MKDIR})"
+if ! echo "${DOTDOT_MKDIR}" | grep -q "\[Response\] OK"; then
+    echo "FAILED ('..' path component should normalize: ${DOTDOT_MKDIR})"
     exit 1
 fi
+"${CLIENT_BIN}" -s "${TEST_SOCK}" RMDIR /foo >/dev/null
 
 # Missing path arguments
 MISSING_ARG_MKDIR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" MKDIR)
@@ -544,10 +566,10 @@ if ! echo "${WRITE_NO_ARG}" | grep -q "\[Response\] ERR missing path argument"; 
     exit 1
 fi
 
-# Client rejects embedded newlines
+# Framing carries newlines safely; the filesystem rejects unsupported file content.
 NEWLINE_CLI_ERR=$("${CLIENT_BIN}" -s "${TEST_SOCK}" WRITE /test_content.txt $'line1\nline2' 2>&1 || true)
-if ! echo "${NEWLINE_CLI_ERR}" | grep -q "Commands cannot contain newline characters"; then
-    echo "FAILED (client should reject commands with embedded newlines: ${NEWLINE_CLI_ERR})"
+if ! echo "${NEWLINE_CLI_ERR}" | grep -q "ERR invalid content"; then
+    echo "FAILED (filesystem should reject newline content cleanly: ${NEWLINE_CLI_ERR})"
     exit 1
 fi
 echo "PASSED"
@@ -561,19 +583,31 @@ CONC_PIDS=()
 # 3 writer clients
 for w in {1..3}; do
     python3 -c "
-import socket
+import socket, struct
+
+def recv_exact(sock, length):
+    data = b''
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk: raise EOFError('unexpected end of frame')
+        data += chunk
+    return data
+
+def send_frame(sock, payload):
+    payload = payload if isinstance(payload, bytes) else payload.encode()
+    sock.sendall(b'\x01' + struct.pack('!I', len(payload)) + payload)
+
+def recv_frame(sock):
+    header = recv_exact(sock, 5)
+    assert header[0] == 1
+    return recv_exact(sock, struct.unpack('!I', header[1:])[0]).decode()
+
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect('${TEST_SOCK}')
-buf = ''
 for i in range(40):
-    cmd = f'WRITE /concurrent_file.txt WRITER_${w}_PAYLOAD_INDEX_{i}\n'
-    s.sendall(cmd.encode())
-    while '\n' not in buf:
-        chunk = s.recv(256).decode()
-        if not chunk: break
-        buf += chunk
-    line, buf = buf.split('\n', 1)
-    assert 'OK' in line
+    cmd = f'WRITE /concurrent_file.txt WRITER_${w}_PAYLOAD_INDEX_{i}'
+    send_frame(s, cmd)
+    assert recv_frame(s) == 'OK'
 s.close()
 " >"${TEST_TMP_DIR}/conc_writer_${w}.log" 2>&1 &
     CONC_PIDS+=($!)
@@ -582,17 +616,30 @@ done
 # 3 reader clients
 for r in {1..3}; do
     python3 -c "
-import socket
+import socket, struct
+
+def recv_exact(sock, length):
+    data = b''
+    while len(data) < length:
+        chunk = sock.recv(length - len(data))
+        if not chunk: raise EOFError('unexpected end of frame')
+        data += chunk
+    return data
+
+def send_frame(sock, payload):
+    payload = payload if isinstance(payload, bytes) else payload.encode()
+    sock.sendall(b'\x01' + struct.pack('!I', len(payload)) + payload)
+
+def recv_frame(sock):
+    header = recv_exact(sock, 5)
+    assert header[0] == 1
+    return recv_exact(sock, struct.unpack('!I', header[1:])[0]).decode()
+
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect('${TEST_SOCK}')
-buf = ''
 for i in range(40):
-    s.sendall(b'READ /concurrent_file.txt\n')
-    while '\n' not in buf:
-        chunk = s.recv(256).decode()
-        if not chunk: break
-        buf += chunk
-    line, buf = buf.split('\n', 1)
+    send_frame(s, 'READ /concurrent_file.txt')
+    line = recv_frame(s)
     assert line == 'SEED_PAYLOAD' or line.startswith('WRITER_'), f'Corrupted line: {line}'
 s.close()
 " >"${TEST_TMP_DIR}/conc_reader_${r}.log" 2>&1 &
@@ -867,6 +914,67 @@ if ! echo "${READ_MV_RESTART}" | grep -q "MovedData"; then
     echo "FAILED (moved file not accessible after restart: ${READ_MV_RESTART})"
     exit 1
 fi
+
+# Test 21: Required shell commands, long listing, and connection-local cwd
+echo -n "[Test 21/21] Required shell commands and per-client sessions... "
+CORE_SHELL_OUTPUT=$(printf "pwd\nmkdir shell_dir\ncd shell_dir\npwd\ntouch note.txt\ntouch note.txt\nls\nls -l\ncd ..\nrm -rf shell_dir\nls\nQUIT\n" | "${CLIENT_BIN}" -s "${M7_SOCK}")
+if ! echo "${CORE_SHELL_OUTPUT}" | grep -Fq "[Response] /shell_dir" || \
+   ! echo "${CORE_SHELL_OUTPUT}" | grep -Fq "[Response] file 0 note.txt" || \
+   ! echo "${CORE_SHELL_OUTPUT}" | grep -Fq "[Response] mv_dst_dir" || \
+   echo "${CORE_SHELL_OUTPUT}" | grep -Fq "[Response] mv_dst_dir shell_dir" || \
+   ! echo "${CORE_SHELL_OUTPUT}" | grep -Fq "[Response] OK"; then
+    echo "FAILED (required command sequence returned unexpected output: ${CORE_SHELL_OUTPUT})"
+    exit 1
+fi
+
+python3 -c "
+import socket, struct
+
+def exact(sock, size):
+    data = b''
+    while len(data) < size:
+        part = sock.recv(size - len(data))
+        if not part: raise EOFError('unexpected end of frame')
+        data += part
+    return data
+
+def send(sock, message):
+    payload = message.encode()
+    sock.sendall(b'\x01' + struct.pack('!I', len(payload)) + payload)
+
+def receive(sock):
+    header = exact(sock, 5)
+    assert header[0] == 1
+    return exact(sock, struct.unpack('!I', header[1:])[0]).decode()
+
+a = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+b = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+a.connect('${M7_SOCK}')
+b.connect('${M7_SOCK}')
+send(a, 'cd /mv_dst_dir')
+assert receive(a) == 'OK'
+send(b, 'pwd')
+assert receive(b) == '/', 'new client must start at root'
+send(a, 'pwd')
+assert receive(a) == '/mv_dst_dir', 'cwd must persist for this connection'
+send(b, 'rm -rf /mv_dst_dir')
+assert receive(b) == 'OK'
+send(a, 'pwd')
+assert receive(a).startswith('ERR current directory was removed')
+send(a, 'pwd')
+assert receive(a) == '/', 'stale cwd should reset to root'
+send(a, 'QUIT')
+assert receive(a) == 'BYE'
+send(b, 'QUIT')
+assert receive(b) == 'BYE'
+a.close()
+b.close()
+"
+if [[ $? -ne 0 ]]; then
+    echo "FAILED (per-client cwd or deleted-cwd recovery failed)"
+    exit 1
+fi
+echo "PASSED"
 
 # Clean shutdown
 "${CLIENT_BIN}" -s "${M7_SOCK}" SHUTDOWN >/dev/null 2>&1 || true

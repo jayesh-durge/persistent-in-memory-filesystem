@@ -2,6 +2,8 @@
 #define PISF_COMMON_HPP
 
 #include <cerrno>
+#include <arpa/inet.h>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -139,6 +141,8 @@ inline bool send_line(int fd, const std::string& message, std::string& err_msg) 
 
 // Maximum permitted command-line length in bytes (excluding newline delimiter)
 constexpr size_t MAX_COMMAND_LINE_LENGTH = 64 * 1024; // 64 KiB
+constexpr uint8_t PROTOCOL_VERSION = 1;
+constexpr uint32_t MAX_FRAME_PAYLOAD_LENGTH = 1024 * 1024; // 1 MiB
 
 enum class ReadStatus {
     Success,
@@ -218,6 +222,88 @@ inline ReadStatus read_line(int fd, std::string& line_out, std::string& buffer, 
             return ReadStatus::Error;
         }
     }
+}
+
+// Sends one versioned frame: one version byte, a network-order 32-bit payload
+// length, then exactly that many payload bytes.
+inline bool send_frame(int fd, const std::string& payload, std::string& err_msg) {
+    if (payload.size() > MAX_FRAME_PAYLOAD_LENGTH) {
+        err_msg = "frame exceeds maximum payload length";
+        return false;
+    }
+
+    uint32_t network_length = htonl(static_cast<uint32_t>(payload.size()));
+    std::string frame;
+    frame.reserve(1 + sizeof(network_length) + payload.size());
+    frame.push_back(static_cast<char>(PROTOCOL_VERSION));
+    frame.append(reinterpret_cast<const char*>(&network_length), sizeof(network_length));
+    frame.append(payload);
+
+    size_t sent_total = 0;
+    while (sent_total < frame.size()) {
+        ssize_t sent = ::send(fd, frame.data() + sent_total, frame.size() - sent_total, MSG_NOSIGNAL);
+        if (sent > 0) {
+            sent_total += static_cast<size_t>(sent);
+        } else if (sent < 0 && errno == EINTR) {
+            continue;
+        } else {
+            err_msg = sent == 0 ? "send() returned 0 (peer closed connection)"
+                                : "send() failed: " + std::string(std::strerror(errno));
+            return false;
+        }
+    }
+    return true;
+}
+
+// Reads exactly one versioned frame. EOF between frames is PeerClosed; EOF in
+// a header or payload is a protocol error. Partial socket reads are expected.
+inline ReadStatus read_frame(int fd, std::string& payload_out, std::string& err_msg) {
+    unsigned char header[1 + sizeof(uint32_t)]{};
+    size_t header_read = 0;
+    while (header_read < sizeof(header)) {
+        ssize_t received = ::recv(fd, header + header_read, sizeof(header) - header_read, 0);
+        if (received > 0) {
+            header_read += static_cast<size_t>(received);
+        } else if (received < 0 && errno == EINTR) {
+            continue;
+        } else if (received == 0 && header_read == 0) {
+            return ReadStatus::PeerClosed;
+        } else {
+            err_msg = received == 0 ? "incomplete frame header"
+                                    : "recv() failed: " + std::string(std::strerror(errno));
+            return ReadStatus::Error;
+        }
+    }
+
+    if (header[0] != PROTOCOL_VERSION) {
+        err_msg = "unsupported protocol version";
+        return ReadStatus::Error;
+    }
+
+    uint32_t network_length = 0;
+    std::memcpy(&network_length, header + 1, sizeof(network_length));
+    uint32_t payload_length = ntohl(network_length);
+    if (payload_length > MAX_FRAME_PAYLOAD_LENGTH) {
+        err_msg = "frame exceeds maximum payload length";
+        return ReadStatus::Error;
+    }
+
+    payload_out.assign(payload_length, '\0');
+    size_t payload_read = 0;
+    while (payload_read < payload_length) {
+        ssize_t received = ::recv(fd, payload_out.data() + payload_read, payload_length - payload_read, 0);
+        if (received > 0) {
+            payload_read += static_cast<size_t>(received);
+        } else if (received < 0 && errno == EINTR) {
+            continue;
+        } else {
+            err_msg = received == 0 ? "incomplete frame payload"
+                                    : "recv() failed: " + std::string(std::strerror(errno));
+            payload_out.clear();
+            return ReadStatus::Error;
+        }
+    }
+    return ReadStatus::Success;
 }
 
 } // namespace pisf

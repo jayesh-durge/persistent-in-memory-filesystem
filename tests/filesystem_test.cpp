@@ -69,6 +69,29 @@ void test_listing_and_sorting() {
     std::cout << "PASSED\n";
 }
 
+void test_touch_long_listing_and_recursive_removal() {
+    std::cout << "Running test_touch_long_listing_and_recursive_removal... ";
+    pisf::Filesystem fs;
+
+    assert(fs.mkdir("/tree") == "OK");
+    assert(fs.mkdir("/tree/nested") == "OK");
+    assert(fs.touch("/tree/file.txt") == "OK");
+    assert(fs.touch("/tree/file.txt") == "OK");
+    assert(fs.touch("/tree/nested/empty.txt") == "OK");
+    assert(fs.touch("/tree/nested") == "ERR cannot touch a directory");
+    assert(fs.write("/tree/file.txt", "data") == "OK");
+    assert(fs.ls("/tree", true) == "file 4 file.txt\ndirectory 0 nested");
+
+    assert(fs.rm_recursive("/tree") == "OK");
+    assert(!fs.exists("/tree"));
+    assert(!fs.exists("/tree/file.txt"));
+    assert(!fs.exists("/tree/nested/empty.txt"));
+    assert(fs.total_nodes() == 1);
+    assert(fs.rm_recursive("/") == "ERR cannot remove root");
+
+    std::cout << "PASSED\n";
+}
+
 void test_stat_metadata() {
     std::cout << "Running test_stat_metadata... ";
     pisf::Filesystem fs;
@@ -1093,6 +1116,48 @@ void test_read_line_bounded_input() {
     assert(line == "CMD3");
     assert(buffer.empty());
 
+    ::close(sv[0]);
+    ::close(sv[1]);
+    std::cout << "PASSED\n";
+}
+
+void test_versioned_binary_frame_protocol() {
+    std::cout << "Running test_versioned_binary_frame_protocol... ";
+    int sv[2]{};
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+
+    const std::string binary_payload("WRITE /file ", 12);
+    const std::string payload = binary_payload + std::string("a\0b", 3);
+    std::thread fragmented_writer([&]() {
+        uint32_t network_length = htonl(static_cast<uint32_t>(payload.size()));
+        std::string frame;
+        frame.push_back(static_cast<char>(pisf::PROTOCOL_VERSION));
+        frame.append(reinterpret_cast<const char*>(&network_length), sizeof(network_length));
+        frame += payload;
+        for (char byte : frame) {
+            ssize_t written = ::send(sv[0], &byte, 1, 0);
+            assert(written == 1);
+            std::this_thread::yield();
+        }
+    });
+
+    std::string received;
+    std::string err;
+    assert(pisf::read_frame(sv[1], received, err) == pisf::ReadStatus::Success);
+    assert(received == payload);
+    fragmented_writer.join();
+
+    assert(pisf::send_frame(sv[1], "OK", err));
+    assert(pisf::read_frame(sv[0], received, err) == pisf::ReadStatus::Success);
+    assert(received == "OK");
+    ::close(sv[0]);
+    ::close(sv[1]);
+
+    assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    const unsigned char bad_version[5] = {2, 0, 0, 0, 0};
+    assert(::send(sv[0], bad_version, sizeof(bad_version), 0) == static_cast<ssize_t>(sizeof(bad_version)));
+    assert(pisf::read_frame(sv[1], received, err) == pisf::ReadStatus::Error);
+    assert(err == "unsupported protocol version");
     ::close(sv[0]);
     ::close(sv[1]);
     std::cout << "PASSED\n";
@@ -2462,6 +2527,7 @@ int main() {
     test_root_initialization();
     test_create_and_mkdir();
     test_listing_and_sorting();
+    test_touch_long_listing_and_recursive_removal();
     test_stat_metadata();
     test_stat_content_length();
     test_stat_content_length_after_restart();
@@ -2492,6 +2558,7 @@ int main() {
     test_mutation_persistence();
     test_mutation_persistence_failure_rollback();
     test_mutation_persistence_dir_sync_failure_no_state_mismatch();
+    test_versioned_binary_frame_protocol();
     test_read_line_bounded_input();
 
     // Milestone 7 — RM

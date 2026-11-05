@@ -2,6 +2,7 @@
 #include <pisf/filesystem.hpp>
 
 #include <atomic>
+#include <cctype>
 #include <csignal>
 #include <cstring>
 #include <fcntl.h>
@@ -85,10 +86,62 @@ void print_usage(const char* prog_name) {
               << "  -h, --help              Show this help message\n";
 }
 
-// Dispatches a single client command. Returns false if the client session should terminate.
-bool handle_client_command(const std::string& request, int client_fd, std::string& err) {
+struct ClientSession {
+    std::string cwd{"/"};
+};
+
+bool resolve_session_path(const std::string& cwd, const std::string& path, std::string& out_path,
+                          std::string& err) {
+    if (path.empty()) {
+        err = "ERR missing path argument";
+        return false;
+    }
+    std::vector<std::string> components;
+    auto append_components = [&](const std::string& value) {
+        size_t pos = 0;
+        while (pos < value.size()) {
+            while (pos < value.size() && value[pos] == '/') ++pos;
+            size_t start = pos;
+            while (pos < value.size() && value[pos] != '/') ++pos;
+            if (start == pos) continue;
+            std::string part = value.substr(start, pos - start);
+            if (part == ".") continue;
+            if (part == "..") {
+                if (!components.empty()) components.pop_back();
+                continue;
+            }
+            for (unsigned char c : part) {
+                if (c <= 32 || c == 127) return false;
+            }
+            components.push_back(std::move(part));
+        }
+        return true;
+    };
+
+    if (path.front() != '/') {
+        if (!append_components(cwd)) {
+            err = "ERR invalid current directory";
+            return false;
+        }
+    }
+    if (!append_components(path)) {
+        err = "ERR invalid path component: whitespace and control characters not allowed";
+        return false;
+    }
+
+    out_path = "/";
+    for (size_t i = 0; i < components.size(); ++i) {
+        if (i != 0) out_path += '/';
+        out_path += components[i];
+    }
+    return true;
+}
+
+// Dispatches one framed request. cwd belongs to this client connection only.
+bool handle_client_command(const std::string& request, int client_fd, ClientSession& session,
+                          std::string& err) {
     if (request.empty()) {
-        if (!pisf::send_line(client_fd, "ERR empty command", err)) {
+        if (!pisf::send_frame(client_fd, "ERR empty command", err)) {
             return false;
         }
         return true;
@@ -97,7 +150,7 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
     // Parse command verb and argument (delimited by whitespace)
     size_t start = request.find_first_not_of(" \t\r\n");
     if (start == std::string::npos) {
-        if (!pisf::send_line(client_fd, "ERR empty command", err)) {
+        if (!pisf::send_frame(client_fd, "ERR empty command", err)) {
             return false;
         }
         return true;
@@ -118,13 +171,15 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         }
     }
 
+    for (char& c : verb) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
     if (verb == "PING") {
         if (!arg.empty()) {
             std::string err_resp = "ERR unknown command '" + request + "'";
             log_msg("[Info] " + err_resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, err_resp, err);
+            return pisf::send_frame(client_fd, err_resp, err);
         }
-        if (!pisf::send_line(client_fd, "PONG", err)) {
+        if (!pisf::send_frame(client_fd, "PONG", err)) {
             return false;
         }
         log_msg("[Info] Handled PING -> PONG (fd: " + std::to_string(client_fd) + ")");
@@ -132,74 +187,133 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
     }
 
     if (verb == "QUIT") {
-        pisf::send_line(client_fd, "BYE", err);
+        pisf::send_frame(client_fd, "BYE", err);
         log_msg("[Info] Handled QUIT -> BYE (closing client connection, fd: " + std::to_string(client_fd) + ")");
         return false;
     }
 
     if (verb == "SHUTDOWN") {
-        pisf::send_line(client_fd, "OK SHUTDOWN", err);
+        pisf::send_frame(client_fd, "OK SHUTDOWN", err);
         log_msg("[Info] Handled SHUTDOWN -> initiating graceful server shutdown (fd: " + std::to_string(client_fd) + ")");
         trigger_shutdown();
         return false;
+    }
+
+    if (verb == "PWD") {
+        if (!arg.empty()) return pisf::send_frame(client_fd, "ERR PWD takes no arguments", err);
+        if (!g_fs.exists(session.cwd)) {
+            session.cwd = "/";
+            return pisf::send_frame(client_fd, "ERR current directory was removed; working directory reset to /", err);
+        }
+        return pisf::send_frame(client_fd, session.cwd, err);
+    }
+
+    if (verb == "CD") {
+        std::string requested = arg.empty() ? "/" : arg;
+        if (!arg.empty() && arg.front() != '/' && !g_fs.exists(session.cwd)) {
+            session.cwd = "/";
+            return pisf::send_frame(client_fd, "ERR current directory was removed; use cd / to continue", err);
+        }
+        std::string target;
+        if (!resolve_session_path(session.cwd, requested, target, err)) {
+            return pisf::send_frame(client_fd, err, err);
+        }
+        std::string details = g_fs.stat(target);
+        if (details.rfind("ERR", 0) == 0) return pisf::send_frame(client_fd, details, err);
+        if (details.find("type=directory") == std::string::npos) {
+            return pisf::send_frame(client_fd, "ERR not a directory", err);
+        }
+        session.cwd = target;
+        return pisf::send_frame(client_fd, "OK", err);
+    }
+
+    if (verb == "HELP") {
+        return pisf::send_frame(client_fd,
+            "OK commands: pwd ls ls -l cd mkdir rm rm -rf touch PING QUIT WRITE READ STAT MV STATS COMPACT", err);
+    }
+
+    if (!g_fs.exists(session.cwd)) {
+        session.cwd = "/";
+        return pisf::send_frame(client_fd,
+            "ERR current directory was removed; working directory reset to /", err);
     }
 
     if (verb == "MKDIR") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled MKDIR -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
-        std::string resp = g_fs.mkdir(arg);
-        log_msg("[Info] Handled MKDIR '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        std::string path;
+        if (!resolve_session_path(session.cwd, arg, path, err)) return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.mkdir(path);
+        log_msg("[Info] Handled MKDIR '" + path + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_frame(client_fd, resp, err);
+    }
+
+    if (verb == "TOUCH") {
+        if (arg.empty()) return pisf::send_frame(client_fd, "ERR missing path argument", err);
+        std::string path;
+        if (!resolve_session_path(session.cwd, arg, path, err)) return pisf::send_frame(client_fd, err, err);
+        return pisf::send_frame(client_fd, g_fs.touch(path), err);
     }
 
     if (verb == "CREATE") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled CREATE -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
-        std::string resp = g_fs.create(arg);
+        std::string path;
+        if (!resolve_session_path(session.cwd, arg, path, err)) return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.create(path);
         log_msg("[Info] Handled CREATE '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "LS") {
-        if (arg.empty()) {
-            std::string resp = "ERR missing path argument";
-            log_msg("[Info] Handled LS -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+        bool long_format = false;
+        std::string list_path = arg;
+        if (list_path == "-l") {
+            long_format = true;
+            list_path.clear();
+        } else if (list_path.rfind("-l ", 0) == 0) {
+            long_format = true;
+            list_path.erase(0, 3);
         }
-        std::string resp = g_fs.ls(arg);
+        std::string path;
+        if (!resolve_session_path(session.cwd, list_path.empty() ? "." : list_path, path, err))
+            return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.ls(path, long_format);
         log_msg("[Info] Handled LS '" + arg + "' -> '" + resp + "' (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "STAT") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled STAT -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
-        std::string resp = g_fs.stat(arg);
+        std::string path;
+        if (!resolve_session_path(session.cwd, arg, path, err)) return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.stat(path);
         log_msg("[Info] Handled STAT '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "WRITE") {
         if (space_pos == std::string::npos) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled WRITE -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
 
         size_t path_start = request.find_first_not_of(" \t", space_pos);
         if (path_start == std::string::npos) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled WRITE -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
 
         size_t path_end = request.find_first_of(" \t", path_start);
@@ -213,31 +327,53 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
             content = request.substr(path_end + 1);
         }
 
-        std::string resp = g_fs.write(path, content);
+        std::string absolute_path;
+        if (!resolve_session_path(session.cwd, path, absolute_path, err)) return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.write(absolute_path, content);
         log_msg("[Info] Handled WRITE '" + path + "' (" + std::to_string(content.size()) + " bytes) -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "RM") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled RM -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
-        std::string resp = g_fs.rm(arg);
-        log_msg("[Info] Handled RM '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        bool recursive = false;
+        std::string target_arg = arg;
+        if (target_arg.rfind("-rf ", 0) == 0 || target_arg.rfind("-fr ", 0) == 0) {
+            recursive = true;
+            target_arg.erase(0, 4);
+        }
+        std::string path;
+        if (!resolve_session_path(session.cwd, target_arg, path, err)) return pisf::send_frame(client_fd, err, err);
+        std::string details = g_fs.stat(path);
+        std::string resp;
+        if (details.rfind("ERR", 0) == 0) {
+            resp = details;
+        } else if (recursive) {
+            resp = g_fs.rm_recursive(path);
+        } else if (details.find("type=directory") != std::string::npos) {
+            resp = g_fs.rmdir(path);
+        } else {
+            resp = g_fs.rm(path);
+        }
+        log_msg("[Info] Handled RM '" + target_arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "RMDIR") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled RMDIR -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
-        std::string resp = g_fs.rmdir(arg);
+        std::string path;
+        if (!resolve_session_path(session.cwd, arg, path, err)) return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.rmdir(path);
         log_msg("[Info] Handled RMDIR '" + arg + "' -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "MV") {
@@ -246,7 +382,7 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         if (space_pos == std::string::npos) {
             std::string resp = "ERR missing arguments: MV requires source and destination paths";
             log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
 
         // Parse two space-separated path arguments
@@ -254,13 +390,13 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         if (src_start == std::string::npos) {
             std::string resp = "ERR missing arguments: MV requires source and destination paths";
             log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
         size_t src_end = request.find_first_of(" \t", src_start);
         if (src_end == std::string::npos) {
             std::string resp = "ERR missing destination path";
             log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
         std::string src_arg = request.substr(src_start, src_end - src_start);
 
@@ -268,25 +404,32 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
         if (dst_start == std::string::npos) {
             std::string resp = "ERR missing destination path";
             log_msg("[Info] Handled MV -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
         size_t dst_end = request.find_last_not_of(" \t\r\n");
         std::string dst_arg = request.substr(dst_start, dst_end - dst_start + 1);
 
-        std::string resp = g_fs.mv(src_arg, dst_arg);
+        std::string src_path;
+        std::string dst_path;
+        if (!resolve_session_path(session.cwd, src_arg, src_path, err) ||
+            !resolve_session_path(session.cwd, dst_arg, dst_path, err))
+            return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.mv(src_path, dst_path);
         log_msg("[Info] Handled MV '" + src_arg + "' -> '" + dst_arg + "' result=" + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "READ") {
         if (arg.empty()) {
             std::string resp = "ERR missing path argument";
             log_msg("[Info] Handled READ -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
-        std::string resp = g_fs.read(arg);
+        std::string path;
+        if (!resolve_session_path(session.cwd, arg, path, err)) return pisf::send_frame(client_fd, err, err);
+        std::string resp = g_fs.read(path);
         log_msg("[Info] Handled READ '" + arg + "' -> '" + resp + "' (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "STATS") {
@@ -297,7 +440,7 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
                            " active_generation=" + std::to_string(stats.active_generation) +
                            " live_files=" + std::to_string(stats.live_files);
         log_msg("[Info] Handled STATS -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     if (verb == "COMPACT") {
@@ -307,24 +450,24 @@ bool handle_client_command(const std::string& request, int client_fd, std::strin
             std::string resp = "OK COMPACT generation=" + std::to_string(stats.active_generation) +
                                " live_bytes=" + std::to_string(stats.live_bytes);
             log_msg("[Info] Handled COMPACT -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         } else {
             std::string resp = "ERR compact failed: " + compact_err;
             log_msg("[Info] Handled COMPACT -> " + resp + " (fd: " + std::to_string(client_fd) + ")");
-            return pisf::send_line(client_fd, resp, err);
+            return pisf::send_frame(client_fd, resp, err);
         }
     }
 
     if (verb == "HELP") {
         std::string resp = "OK commands: PING QUIT SHUTDOWN MKDIR CREATE LS STAT WRITE READ RM RMDIR MV STATS COMPACT";
         log_msg("[Info] Handled HELP (fd: " + std::to_string(client_fd) + ")");
-        return pisf::send_line(client_fd, resp, err);
+        return pisf::send_frame(client_fd, resp, err);
     }
 
     // Unknown command error handling
     std::string err_resp = "ERR unknown command '" + request + "'";
     log_msg("[Info] " + err_resp + " (fd: " + std::to_string(client_fd) + ")");
-    if (!pisf::send_line(client_fd, err_resp, err)) {
+    if (!pisf::send_frame(client_fd, err_resp, err)) {
         return false;
     }
     return true;
@@ -346,18 +489,18 @@ void client_worker_func(int client_fd, std::shared_ptr<std::atomic<bool>> done) 
     }
     log_msg("[Info] Client connected (fd: " + std::to_string(client_fd) + ")");
 
-    std::string client_buffer;
+    ClientSession session;
     std::string err;
     bool keep_client_alive = true;
 
     // Command loop: runs until client requests QUIT/SHUTDOWN, disconnects, or server shuts down
     while (keep_client_alive && !g_shutdown_requested.load(std::memory_order_relaxed)) {
         std::string request_line;
-        pisf::ReadStatus read_stat = pisf::read_line(client_fd, request_line, client_buffer, err);
+        pisf::ReadStatus read_stat = pisf::read_frame(client_fd, request_line, err);
 
         if (read_stat == pisf::ReadStatus::Success) {
             log_msg("[Info] Received: '" + request_line + "' (fd: " + std::to_string(client_fd) + ")");
-            keep_client_alive = handle_client_command(request_line, client_fd, err);
+            keep_client_alive = handle_client_command(request_line, client_fd, session, err);
         } else if (read_stat == pisf::ReadStatus::PeerClosed) {
             log_msg("[Info] Client disconnected (EOF, fd: " + std::to_string(client_fd) + ")");
             break;
@@ -371,7 +514,7 @@ void client_worker_func(int client_fd, std::shared_ptr<std::atomic<bool>> done) 
             if (!g_shutdown_requested.load(std::memory_order_relaxed)) {
                 log_msg("[Warning] Client read error (fd: " + std::to_string(client_fd) + "): " + err);
                 std::string send_err;
-                pisf::send_line(client_fd, "ERR " + err, send_err);
+                pisf::send_frame(client_fd, "ERR " + err, send_err);
             }
             break;
         }

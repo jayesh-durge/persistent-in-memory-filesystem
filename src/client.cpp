@@ -14,6 +14,13 @@ void print_usage(const char* prog_name) {
               << "  -h, --help            Show this help message\n\n"
               << "If no command is provided, starts an interactive command loop (REPL).\n\n"
               << "Supported commands:\n"
+              << "  pwd                   Prints this session's current directory\n"
+              << "  ls [-l] [path]        Lists a directory\n"
+              << "  cd [path]             Changes this session's current directory\n"
+              << "  mkdir <path>          Creates a directory\n"
+              << "  touch <path>          Creates an empty file if needed\n"
+              << "  rm <path>             Removes a file or empty directory\n"
+              << "  rm -rf <path>         Recursively removes a directory\n"
               << "  PING                  Checks server liveness (expects PONG)\n"
               << "  QUIT                  Ends the current client session\n"
               << "  SHUTDOWN              Requests graceful server termination\n"
@@ -31,18 +38,14 @@ void print_usage(const char* prog_name) {
               << "  HELP                  Displays supported commands\n";
 }
 
-bool execute_single_command(int client_fd, const std::string& cmd, std::string& recv_buffer, std::string& response_out) {
-    if (cmd.find('\n') != std::string::npos || cmd.find('\r') != std::string::npos) {
-        std::cerr << "[Error] Commands cannot contain newline characters\n";
-        return false;
-    }
+bool execute_single_command(int client_fd, const std::string& cmd, std::string& response_out) {
     std::string err;
-    if (!pisf::send_line(client_fd, cmd, err)) {
+    if (!pisf::send_frame(client_fd, cmd, err)) {
         std::cerr << "[Error] Failed to send command '" << cmd << "': " << err << "\n";
         return false;
     }
 
-    pisf::ReadStatus read_stat = pisf::read_line(client_fd, response_out, recv_buffer, err);
+    pisf::ReadStatus read_stat = pisf::read_frame(client_fd, response_out, err);
     if (read_stat == pisf::ReadStatus::Success) {
         return true;
     } else if (read_stat == pisf::ReadStatus::PeerClosed) {
@@ -63,12 +66,12 @@ int main(int argc, char* argv[]) {
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
-        if (arg == "-h" || arg == "--help") {
+        if (!has_single_command && (arg == "-h" || arg == "--help")) {
             print_usage(argv[0]);
             return 0;
-        } else if ((arg == "-s" || arg == "--socket") && i + 1 < argc) {
+        } else if (!has_single_command && (arg == "-s" || arg == "--socket") && i + 1 < argc) {
             socket_path = argv[++i];
-        } else if (arg.rfind("-", 0) == 0) {
+        } else if (!has_single_command && arg.rfind("-", 0) == 0) {
             std::cerr << "Unknown option: " << arg << "\n";
             print_usage(argv[0]);
             return 1;
@@ -104,12 +107,10 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string recv_buffer;
-
     if (has_single_command) {
         // Single command execution mode
         std::string response;
-        if (execute_single_command(client_fd, single_command, recv_buffer, response)) {
+        if (execute_single_command(client_fd, single_command, response)) {
             std::cout << "[Response] " << response << "\n";
             ::close(client_fd);
             return 0;
@@ -149,7 +150,7 @@ int main(int argc, char* argv[]) {
         }
 
         std::string response;
-        if (!execute_single_command(client_fd, line, recv_buffer, response)) {
+        if (!execute_single_command(client_fd, line, response)) {
             break;
         }
 
