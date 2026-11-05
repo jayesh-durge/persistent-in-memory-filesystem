@@ -1,8 +1,8 @@
 #include <pisf/filesystem.hpp>
 #include <pisf/metadata.hpp>
+#include <pisf/posix_fs.hpp>
 
 #include <algorithm>
-#include <filesystem>
 
 #include <pisf/common.hpp>
 
@@ -19,8 +19,8 @@ Filesystem::Filesystem(std::string data_dir) {
 
 Filesystem::~Filesystem() {
     if (!ephemeral_dir_.empty()) {
-        std::error_code ec;
-        std::filesystem::remove_all(ephemeral_dir_, ec);
+        std::string cleanup_err;
+        posix_fs::remove_tree(ephemeral_dir_, cleanup_err);
     }
 }
 
@@ -52,8 +52,8 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
 
     // If we previously had an ephemeral directory, clean it up
     if (!ephemeral_dir_.empty() && ephemeral_dir_ != data_dir) {
-        std::error_code ec;
-        std::filesystem::remove_all(ephemeral_dir_, ec);
+        std::string cleanup_err;
+        posix_fs::remove_tree(ephemeral_dir_, cleanup_err);
         ephemeral_dir_.clear();
     }
 
@@ -64,17 +64,22 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::create_directories(data_dir, ec);
-    if (ec) {
-        err_msg = "Failed to create storage directory '" + data_dir + "': " + ec.message();
+    std::string path_err;
+    if (!posix_fs::ensure_directories(data_dir, path_err)) {
+        err_msg = "Failed to create storage directory '" + data_dir + "': " + path_err;
         is_initialized_ = false;
         init_error_ = err_msg;
         return false;
     }
 
-    std::string meta_path = (std::filesystem::path(data_dir) / "metadata.pisf").string();
-    bool meta_exists = std::filesystem::is_regular_file(meta_path, ec);
+    std::string meta_path = posix_fs::join(data_dir, "metadata.pisf");
+    bool meta_exists = false;
+    if (!posix_fs::is_regular_file(meta_path, meta_exists, path_err)) {
+        err_msg = path_err;
+        is_initialized_ = false;
+        init_error_ = err_msg;
+        return false;
+    }
 
     if (meta_exists) {
         MetadataState state;
@@ -85,8 +90,9 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
         }
 
         std::string blob_filename = BlobStorage::format_blob_filename(state.blob_generation);
-        std::string active_blob_path = (std::filesystem::path(data_dir) / blob_filename).string();
-        if (!std::filesystem::is_regular_file(active_blob_path, ec)) {
+        std::string active_blob_path = posix_fs::join(data_dir, blob_filename);
+        bool active_blob_exists = false;
+        if (!posix_fs::is_regular_file(active_blob_path, active_blob_exists, path_err) || !active_blob_exists) {
             err_msg = "ERR missing blob for active generation: '" + blob_filename +
                       "' is missing in '" + data_dir + "'";
             is_initialized_ = false;
@@ -121,8 +127,14 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
 
     // Metadata file does not exist
     bool any_blob_exists = false;
-    for (const auto& entry : std::filesystem::directory_iterator(data_dir, ec)) {
-        std::string fname = entry.path().filename().string();
+    std::vector<std::string> directory_names;
+    if (!posix_fs::list_directory(data_dir, directory_names, path_err)) {
+        err_msg = path_err;
+        is_initialized_ = false;
+        init_error_ = err_msg;
+        return false;
+    }
+    for (const auto& fname : directory_names) {
         if (fname == "data.blob" ||
             (fname.rfind("data-", 0) == 0 && fname.size() > 5 && fname.substr(fname.size() - 5) == ".blob")) {
             any_blob_exists = true;
@@ -138,8 +150,7 @@ bool Filesystem::init_storage(const std::string& data_dir, std::string& err_msg)
         return false;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(data_dir, ec)) {
-        std::string filename = entry.path().filename().string();
+    for (const auto& filename : directory_names) {
         if (!filename.empty() && filename[0] != '.') {
             err_msg = "ERR missing metadata: storage directory '" + data_dir +
                       "' is not empty but 'metadata.pisf' is missing; refusing to initialize empty filesystem";
@@ -454,6 +465,61 @@ std::string Filesystem::create(const std::string& path) {
     return "OK";
 }
 
+std::string Filesystem::touch(const std::string& path) {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+    if (components.empty()) {
+        return "ERR cannot create file at root";
+    }
+
+    std::string target_name = components.back();
+    components.pop_back();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    NodeId parent_id = 0;
+    if (!resolve_path_locked(components, parent_id, err_msg)) {
+        return err_msg;
+    }
+    auto parent_it = nodes_.find(parent_id);
+    if (parent_it == nodes_.end() || parent_it->second.type != NodeType::Directory) {
+        return "ERR not a directory: parent is a file";
+    }
+    Node& parent_node = parent_it->second;
+
+    auto existing = parent_node.children.find(target_name);
+    if (existing != parent_node.children.end()) {
+        auto node_it = nodes_.find(existing->second);
+        return node_it != nodes_.end() && node_it->second.type == NodeType::File
+                   ? "OK"
+                   : "ERR cannot touch a directory";
+    }
+
+    NodeId new_id = next_node_id_++;
+    Node new_node;
+    new_node.id = new_id;
+    new_node.name = target_name;
+    new_node.type = NodeType::File;
+    new_node.parent_id = parent_id;
+    nodes_[new_id] = std::move(new_node);
+    parent_node.children[target_name] = new_id;
+
+    std::string persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            nodes_.erase(new_id);
+            parent_node.children.erase(target_name);
+            next_node_id_ = new_id;
+            return "ERR metadata persistence failed: " + persist_err;
+        }
+        return "ERR metadata directory sync failed: " + persist_err;
+    }
+    return "OK";
+}
+
 std::string Filesystem::rm(const std::string& path) {
     std::vector<std::string> components;
     std::string err_msg;
@@ -510,6 +576,62 @@ std::string Filesystem::rm(const std::string& path) {
     }
 
     // Blob extents for this file become orphaned (data.blob is append-only; no compaction)
+    return "OK";
+}
+
+std::string Filesystem::rm_recursive(const std::string& path) {
+    std::vector<std::string> components;
+    std::string err_msg;
+    if (!parse_path(path, components, err_msg)) {
+        return err_msg;
+    }
+    if (components.empty()) {
+        return "ERR cannot remove root";
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    NodeId target_id = 0;
+    if (!resolve_path_locked(components, target_id, err_msg)) {
+        return err_msg;
+    }
+    auto target_it = nodes_.find(target_id);
+    if (target_it == nodes_.end()) {
+        return "ERR internal error: node missing";
+    }
+    NodeId parent_id = target_it->second.parent_id.value();
+    auto parent_it = nodes_.find(parent_id);
+    if (parent_it == nodes_.end()) {
+        return "ERR internal error: parent node missing";
+    }
+
+    // Keep one snapshot so a failed metadata commit can restore the complete
+    // subtree without leaving dangling child ids.
+    auto previous_nodes = nodes_;
+    parent_it->second.children.erase(target_it->second.name);
+    std::vector<NodeId> pending{target_id};
+    while (!pending.empty()) {
+        NodeId current_id = pending.back();
+        pending.pop_back();
+        auto current_it = nodes_.find(current_id);
+        if (current_it == nodes_.end()) {
+            continue;
+        }
+        for (const auto& [child_name, child_id] : current_it->second.children) {
+            static_cast<void>(child_name);
+            pending.push_back(child_id);
+        }
+        nodes_.erase(current_it);
+    }
+
+    std::string persist_err;
+    bool committed = false;
+    if (!save_metadata_locked(persist_err, committed)) {
+        if (!committed) {
+            nodes_ = std::move(previous_nodes);
+            return "ERR metadata persistence failed: " + persist_err;
+        }
+        return "ERR metadata directory sync failed: " + persist_err;
+    }
     return "OK";
 }
 
@@ -690,7 +812,7 @@ std::string Filesystem::mv(const std::string& src_path, const std::string& dst_p
     return "OK";
 }
 
-std::string Filesystem::ls(const std::string& path) const {
+std::string Filesystem::ls(const std::string& path, bool long_format) const {
     std::vector<std::string> components;
     std::string err_msg;
     if (!parse_path(path, components, err_msg)) {
@@ -714,21 +836,29 @@ std::string Filesystem::ls(const std::string& path) const {
         return "ERR not a directory";
     }
 
-    std::vector<std::string> child_names;
-    child_names.reserve(node.children.size());
-    for (const auto& [name, id] : node.children) {
-        static_cast<void>(id);
-        child_names.push_back(name);
+    std::vector<std::pair<std::string, NodeId>> children;
+    children.reserve(node.children.size());
+    for (const auto& [name, child_id] : node.children) {
+        children.emplace_back(name, child_id);
     }
 
-    std::sort(child_names.begin(), child_names.end());
+    std::sort(children.begin(), children.end(), [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
 
     std::string result;
-    for (size_t i = 0; i < child_names.size(); ++i) {
+    for (size_t i = 0; i < children.size(); ++i) {
         if (i > 0) {
+            result += long_format ? '\n' : ' ';
+        }
+        if (long_format) {
+            const Node& child = nodes_.at(children[i].second);
+            result += to_string(child.type);
+            result += ' ';
+            result += std::to_string(child.type == NodeType::File ? child.content_length : 0);
             result += ' ';
         }
-        result += child_names[i];
+        result += children[i].first;
     }
 
     return result;
@@ -911,25 +1041,26 @@ void Filesystem::cleanup_obsolete_blobs_locked(uint64_t active_gen) {
         return;
     }
 
-    std::error_code ec;
     std::string active_name = BlobStorage::format_blob_filename(active_gen);
-    for (const auto& entry : std::filesystem::directory_iterator(data_dir_, ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec)) continue;
-
-        std::string fname = entry.path().filename().string();
+    std::vector<std::string> names;
+    std::string ignored_err;
+    if (!posix_fs::list_directory(data_dir_, names, ignored_err)) return;
+    for (const auto& fname : names) {
+        bool regular_file = false;
+        if (!posix_fs::is_regular_file(posix_fs::join(data_dir_, fname), regular_file, ignored_err) ||
+            !regular_file) continue;
         if (fname == active_name) continue;
 
         if (fname == "data.blob") {
             if (active_gen != 0) {
-                std::filesystem::remove(entry.path(), ec);
+                posix_fs::unlink_if_exists(posix_fs::join(data_dir_, fname), ignored_err);
             }
         } else if (fname.rfind("data-", 0) == 0 && fname.size() > 10 &&
                    fname.substr(fname.size() - 5) == ".blob") {
             try {
                 uint64_t g = std::stoull(fname.substr(5, fname.size() - 10));
                 if (g != active_gen) {
-                    std::filesystem::remove(entry.path(), ec);
+                    posix_fs::unlink_if_exists(posix_fs::join(data_dir_, fname), ignored_err);
                 }
             } catch (...) {
                 // Ignore parsing errors for other files
@@ -950,10 +1081,11 @@ bool Filesystem::compact(std::string& err_msg) {
 
     // Remove any leftover blob with new_gen from an earlier aborted attempt
     std::string new_blob_filename = BlobStorage::format_blob_filename(new_gen);
-    std::string new_blob_path = (std::filesystem::path(data_dir_) / new_blob_filename).string();
-    std::error_code ec;
-    if (std::filesystem::exists(new_blob_path, ec)) {
-        std::filesystem::remove(new_blob_path, ec);
+    std::string new_blob_path = posix_fs::join(data_dir_, new_blob_filename);
+    std::string ignored_err;
+    if (!posix_fs::unlink_if_exists(new_blob_path, ignored_err)) {
+        err_msg = ignored_err;
+        return false;
     }
 
     auto new_storage = std::make_shared<BlobStorage>(data_dir_, new_gen);
@@ -986,7 +1118,7 @@ bool Filesystem::compact(std::string& err_msg) {
         std::string chunk;
         if (!storage_ || !storage_->read_range(node.content_offset, node.content_length, chunk, err_msg)) {
             new_storage->close();
-            std::filesystem::remove(new_blob_path, ec);
+            posix_fs::unlink_if_exists(new_blob_path, ignored_err);
             err_msg = "Compaction read failed for node " + std::to_string(id) + ": " + err_msg;
             return false;
         }
@@ -995,7 +1127,7 @@ bool Filesystem::compact(std::string& err_msg) {
         uint64_t new_length = 0;
         if (!new_storage->append(chunk, new_offset, new_length, err_msg)) {
             new_storage->close();
-            std::filesystem::remove(new_blob_path, ec);
+            posix_fs::unlink_if_exists(new_blob_path, ignored_err);
             err_msg = "Compaction append failed for node " + std::to_string(id) + ": " + err_msg;
             return false;
         }
@@ -1015,7 +1147,7 @@ bool Filesystem::compact(std::string& err_msg) {
 
     if (simulate_metadata_failure_) {
         new_storage->close();
-        std::filesystem::remove(new_blob_path, ec);
+        posix_fs::unlink_if_exists(new_blob_path, ignored_err);
         err_msg = "simulated metadata persistence failure during compaction";
         return false;
     }
@@ -1024,7 +1156,7 @@ bool Filesystem::compact(std::string& err_msg) {
     if (!MetadataSerializer::save_to_file_atomic(data_dir_, new_state, err_msg, &committed)) {
         if (!committed) {
             new_storage->close();
-            std::filesystem::remove(new_blob_path, ec);
+            posix_fs::unlink_if_exists(new_blob_path, ignored_err);
             err_msg = "Compaction metadata persistence failed: " + err_msg;
             return false;
         }

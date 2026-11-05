@@ -1,4 +1,5 @@
 #include <pisf/metadata.hpp>
+#include <pisf/posix_fs.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -7,7 +8,6 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
-#include <filesystem>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -486,15 +486,14 @@ bool MetadataSerializer::save_to_file_atomic(const std::string& data_dir, const 
         return false;
     }
 
-    std::filesystem::path dir_path(data_dir);
     std::string tmp_name = "metadata.pisf.tmp." + std::to_string(getpid()) + "." +
                            std::to_string(g_tmp_counter.fetch_add(1));
-    std::filesystem::path tmp_path = dir_path / tmp_name;
-    std::filesystem::path final_path = dir_path / "metadata.pisf";
+    std::string tmp_path = posix_fs::join(data_dir, tmp_name);
+    std::string final_path = posix_fs::join(data_dir, "metadata.pisf");
 
     int fd = ::open(tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
-        err_msg = "Failed to create temporary metadata file '" + tmp_path.string() + "': " + std::strerror(errno);
+        err_msg = "Failed to create temporary metadata file '" + tmp_path + "': " + std::strerror(errno);
         return false;
     }
 
@@ -604,10 +603,10 @@ bool MetadataSerializer::load_from_file(const std::string& data_dir, MetadataSta
         return false;
     }
 
-    std::filesystem::path meta_path = std::filesystem::path(data_dir) / "metadata.pisf";
+    std::string meta_path = posix_fs::join(data_dir, "metadata.pisf");
     int fd = ::open(meta_path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        err_msg = "Failed to open metadata file '" + meta_path.string() + "': " + std::strerror(errno);
+        err_msg = "Failed to open metadata file '" + meta_path + "': " + std::strerror(errno);
         return false;
     }
 

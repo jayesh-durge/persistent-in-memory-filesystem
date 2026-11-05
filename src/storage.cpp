@@ -1,10 +1,10 @@
 #include <pisf/storage.hpp>
 #include <pisf/common.hpp>
+#include <pisf/posix_fs.hpp>
 
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
-#include <filesystem>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -25,7 +25,7 @@ std::string BlobStorage::format_blob_filename(uint64_t generation) {
 BlobStorage::BlobStorage(std::string data_dir, std::string blob_filename)
     : data_dir_(std::move(data_dir)),
       blob_filename_(std::move(blob_filename)),
-      blob_path_((std::filesystem::path(data_dir_) / blob_filename_).string()),
+      blob_path_(posix_fs::join(data_dir_, blob_filename_)),
       generation_(0) {
     // Attempt to infer generation if filename matches data-<N>.blob
     if (blob_filename_.rfind("data-", 0) == 0 && blob_filename_.size() > 10 &&
@@ -42,7 +42,7 @@ BlobStorage::BlobStorage(std::string data_dir, std::string blob_filename)
 BlobStorage::BlobStorage(std::string data_dir, uint64_t generation)
     : data_dir_(std::move(data_dir)),
       blob_filename_(format_blob_filename(generation)),
-      blob_path_((std::filesystem::path(data_dir_) / blob_filename_).string()),
+      blob_path_(posix_fs::join(data_dir_, blob_filename_)),
       generation_(generation) {
 }
 
@@ -90,19 +90,18 @@ bool BlobStorage::init(std::string& err_msg) {
         return false;
     }
 
-    std::error_code ec;
-    std::filesystem::create_directories(data_dir_, ec);
-    if (ec) {
-        err_msg = "Failed to create storage directory '" + data_dir_ + "': " + ec.message();
+    if (!posix_fs::ensure_directories(data_dir_, err_msg)) {
+        err_msg = "Failed to create storage directory '" + data_dir_ + "': " + err_msg;
         return false;
     }
 
-    if (!std::filesystem::is_directory(data_dir_, ec)) {
+    bool directory_exists = false;
+    if (!posix_fs::is_directory(data_dir_, directory_exists, err_msg) || !directory_exists) {
         err_msg = "Storage path '" + data_dir_ + "' exists but is not a directory";
         return false;
     }
 
-    blob_path_ = (std::filesystem::path(data_dir_) / blob_filename_).string();
+    blob_path_ = posix_fs::join(data_dir_, blob_filename_);
 
     fd_ = ::open(blob_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd_ < 0) {

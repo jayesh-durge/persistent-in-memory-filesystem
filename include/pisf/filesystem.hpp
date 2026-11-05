@@ -61,10 +61,12 @@ public:
     // Filesystem operations (thread-safe, protected by internal mutex_)
     std::string mkdir(const std::string& path);
     std::string create(const std::string& path);
+    std::string touch(const std::string& path);
     std::string rm(const std::string& path);
+    std::string rm_recursive(const std::string& path);
     std::string rmdir(const std::string& path);
     std::string mv(const std::string& src_path, const std::string& dst_path);
-    std::string ls(const std::string& path) const;
+    std::string ls(const std::string& path, bool long_format = false) const;
     std::string stat(const std::string& path) const;
     std::string write(const std::string& path, const std::string& content);
     std::string read(const std::string& path) const;
