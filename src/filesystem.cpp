@@ -217,7 +217,7 @@ void Filesystem::set_simulate_metadata_failure(bool simulate) {
     simulate_metadata_failure_ = simulate;
 }
 
-const std::string& Filesystem::data_dir() const {
+std::string Filesystem::data_dir() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return data_dir_;
 }
@@ -227,7 +227,7 @@ bool Filesystem::is_initialized() const {
     return is_initialized_;
 }
 
-const std::string& Filesystem::init_error() const {
+std::string Filesystem::init_error() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return init_error_;
 }

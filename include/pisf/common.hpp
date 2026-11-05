@@ -2,10 +2,8 @@
 #define PISF_COMMON_HPP
 
 #include <cerrno>
-#include <csignal>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>

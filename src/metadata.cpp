@@ -17,8 +17,8 @@ namespace pisf {
 
 namespace {
 
-static std::atomic<uint64_t> g_tmp_counter{0};
-static std::atomic<bool> g_simulate_dir_sync_failure{false};
+std::atomic<uint64_t> g_tmp_counter{0};
+std::atomic<bool> g_simulate_dir_sync_failure{false};
 
 inline void write_u8(std::string& buf, uint8_t val) {
     buf.push_back(static_cast<char>(val));

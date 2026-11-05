@@ -84,9 +84,9 @@ public:
     bool get_node_extent(const std::string& path, uint64_t& out_offset, uint64_t& out_length) const;
     const BlobStorage* storage() const;
     uint64_t blob_generation() const;
-    const std::string& data_dir() const;
+    std::string data_dir() const;
     bool is_initialized() const;
-    const std::string& init_error() const;
+    std::string init_error() const;
 
     // Test helper to simulate metadata persistence failure for rollback testing
     void set_simulate_metadata_failure(bool simulate);

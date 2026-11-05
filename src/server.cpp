@@ -445,7 +445,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "=== PISF Server (Persistent Filesystem Daemon) ===\n"
               << "Socket path:  " << socket_path << "\n"
-              << "Storage path: " << (g_fs.storage() ? g_fs.storage()->data_dir() : data_dir) << "\n"
+              << "Storage path: " << g_fs.data_dir() << "\n"
               << "[Info] Storage initialized: active generation " << g_fs.blob_generation()
               << ", " << g_fs.total_nodes() << " nodes loaded\n";
 

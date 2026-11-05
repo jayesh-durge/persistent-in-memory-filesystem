@@ -104,13 +104,12 @@ bool BlobStorage::init(std::string& err_msg) {
 
     blob_path_ = (std::filesystem::path(data_dir_) / blob_filename_).string();
 
-    int fd = ::open(blob_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) {
+    fd_ = ::open(blob_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd_ < 0) {
         err_msg = "Failed to open or create blob file '" + blob_path_ + "': " + std::strerror(errno);
         return false;
     }
 
-    fd_ = fd;
     return true;
 }
 
