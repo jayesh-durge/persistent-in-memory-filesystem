@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PISF Milestone 9 Checkpoint E — Server Lifecycle & Crash Recovery Tests
+# PISF — Server Lifecycle, Stability & Crash Recovery Test Suite
 #
 # Verifies:
 #  1. FD count stability across repeated client connect/disconnect cycles.

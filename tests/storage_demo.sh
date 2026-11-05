@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PISF Milestone 10 Checkpoint D — Storage Reclamation & Performance Demonstration
+# PISF — Storage Reclamation & Performance Demonstration Script
 #
 # Repeatably demonstrates:
 #  1. Initial storage statistics on fresh filesystem.
@@ -9,7 +9,7 @@
 #  5. Generation-based compaction (generation 0 -> generation 1).
 #  6. Space reclamation: reduced blob size matching live bytes.
 #  7. Data integrity verification after compaction.
-#  8. Milestone 9 Compaction Performance Benchmark Report.
+#  8. Compaction Performance Benchmark Report.
 
 set -euo pipefail
 

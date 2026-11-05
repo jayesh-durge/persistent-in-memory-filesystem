@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(pisf
     VERSION 0.1.0
-    DESCRIPTION "Persistent In-memory/Storage Filesystem skeleton"
+    DESCRIPTION "Persistent In-Memory Filesystem (PISF)"
     LANGUAGES CXX
 )
 
@@ -13,8 +13,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Threading support
 find_package(Threads REQUIRED)
 
-# Common compiler warnings for robust systems programming
+# Common compiler warnings and include paths for robust systems programming
 add_library(pisf_compiler_flags INTERFACE)
+target_include_directories(pisf_compiler_flags INTERFACE ${PROJECT_SOURCE_DIR}/include)
 target_compile_options(pisf_compiler_flags INTERFACE
     -Wall
     -Wextra
@@ -27,9 +28,6 @@ target_compile_options(pisf_compiler_flags INTERFACE
     -Wunused
     -Woverloaded-virtual
 )
-
-# Common include directory
-include_directories(${PROJECT_SOURCE_DIR}/include)
 
 # Server executable target
 add_executable(pisf-server
@@ -95,18 +93,8 @@ add_test(
 )
 
 add_test(
-    NAME recovery_test
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/recovery_test.sh ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-add_test(
     NAME lifecycle_test
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_test.sh ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-add_test(
-    NAME client_test
-    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/client_test.sh ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 add_test(

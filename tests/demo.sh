@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PISF Milestone 10 Checkpoint C — Reproducible Filesystem Demonstration Script
+# PISF — End-to-End Reproducible Filesystem Demonstration Script
 #
 # Deterministically demonstrates the end-to-end PISF lifecycle:
 #  1. Isolated temporary environment setup.
