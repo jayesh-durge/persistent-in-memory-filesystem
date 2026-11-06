@@ -20,13 +20,13 @@ YELLOW="\033[0;33m"
 MAGENTA="\033[0;35m"
 RESET="\033[0m"
 
-BUILD_DIR="${1:-./build}"
+BUILD_DIR="${1:-./build/test/bin}"
 SERVER_BIN="${BUILD_DIR}/pisf-server"
 CLIENT_BIN="${BUILD_DIR}/pisf-client"
 
 if [[ ! -x "${SERVER_BIN}" ]] || [[ ! -x "${CLIENT_BIN}" ]]; then
     echo "Error: Server or client executable not found in ${BUILD_DIR}"
-    echo "Build first: cmake --build ${BUILD_DIR}"
+    echo "Build the test binaries first with: make test-build"
     exit 1
 fi
 
